@@ -35180,32 +35180,45 @@ Qwen3-32B sharded: ~4.1 GB params / GPU (was ~64 GB unsharded)
   });
 })();
 
-/* Remember the reading position and restore it on reopen */
+/* Remember the reading position and restore it on reopen (mobile-robust) */
 (function(){
   var KEY='aitb-scroll';
-  function curY(){return window.scrollY||document.documentElement.scrollTop||0;}
+  // Stop the browser's own scroll restoration from fighting ours (mobile defaults to 'auto' and wins otherwise).
+  if('scrollRestoration' in history){ try{history.scrollRestoration='manual';}catch(e){} }
+  function curY(){return window.scrollY||document.documentElement.scrollTop||document.body.scrollTop||0;}
+  function maxY(){return Math.max(0,(document.documentElement.scrollHeight||0)-window.innerHeight);}
   var saved=null; try{saved=parseFloat(localStorage.getItem(KEY));}catch(e){}
-  if(saved!=null && !isNaN(saved) && saved>0){
+
+  if(saved!=null && !isNaN(saved) && saved>1){
     var root=document.documentElement, prev=root.style.scrollBehavior;
-    root.style.scrollBehavior='auto';                 // jump straight there, don't animate the whole page
-    function restore(){ window.scrollTo(0,saved); }
-    restore();                                         // DOM is parsed (script is at end of body)
-    window.addEventListener('load',function(){         // ...and again once every figure/font settles
-      restore();
-      setTimeout(function(){restore();root.style.scrollBehavior=prev||'';},80);
+    root.style.scrollBehavior='auto';                  // jump straight there, don't animate the whole page
+    var userMoved=false;
+    ['wheel','touchmove','keydown','pointerdown'].forEach(function(ev){
+      window.addEventListener(ev,function(){userMoved=true;},{passive:true,once:true}); // never fight the reader
     });
+    var tries=0;
+    (function settle(){                                 // a huge page isn't laid out instantly — retry until it's tall enough
+      if(userMoved){ root.style.scrollBehavior=prev||''; return; }
+      window.scrollTo(0,saved);
+      tries++;
+      if(tries<60 && (maxY() < saved-2 || Math.abs(curY()-saved) > 2)){
+        requestAnimationFrame(settle);
+      } else {
+        setTimeout(function(){ root.style.scrollBehavior = prev || ''; }, 120);
+      }
+    })();
+    window.addEventListener('load',function(){ if(!userMoved) window.scrollTo(0,saved); });
   }
+
+  function save(){ if(window.__aitbReset)return; try{localStorage.setItem(KEY,String(curY()));}catch(e){} }
   var t=null;
   window.addEventListener('scroll',function(){         // throttle writes so we don't hammer storage
-    if(t)return;
-    t=setTimeout(function(){t=null; if(window.__aitbReset)return;
-      try{localStorage.setItem(KEY,String(curY()));}catch(e){}
-    },250);
+    if(t)return; t=setTimeout(function(){t=null;save();},200);
   },{passive:true});
-  window.addEventListener('beforeunload',function(){
-    if(window.__aitbReset)return;                       // a reset is wiping state — don't re-save
-    try{localStorage.setItem(KEY,String(curY()));}catch(e){}
-  });
+  // These fire reliably on mobile when you leave/close the tab; beforeunload often does NOT on phones.
+  document.addEventListener('visibilitychange',function(){ if(document.visibilityState==='hidden') save(); });
+  window.addEventListener('pagehide',save);
+  window.addEventListener('beforeunload',save);
 })();
 
 /* Reset-to-default button: clear saved theme, sidebar state and reading position */
