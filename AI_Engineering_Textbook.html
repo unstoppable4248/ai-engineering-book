@@ -5273,8 +5273,8 @@ print(len(vector), vector[:3])     <span class="cmt"># show how many numbers, an
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "If you had one week to improve a struggling RAG assistant, where would you spend it?"</p>
-  <p><strong>A.</strong> On parsing and cleaning the hardest documents, not on embeddings or rerankers. Retrieval can only ever return what ingestion put in, so a weak early station sets a ceiling no clever downstream stage can lift. The sharp follow-up they want: "and how do you re-ingest a changed document?" — delete the old chunks by source id <em>before</em> the new ones land, keyed off the manifest's content hash, or the assistant will quote both the 2025 and 2026 fee tables.</p>
+  <div class="q">Q. "If you had one week to improve a struggling RAG assistant, where would you spend it?"</div>
+  <div class="a">A. On parsing and cleaning the hardest documents, not on embeddings or rerankers. Retrieval can only ever return what ingestion put in, so a weak early station sets a ceiling no clever downstream stage can lift. The sharp follow-up they want: "and how do you re-ingest a changed document?" — delete the old chunks by source id <em>before</em> the new ones land, keyed off the manifest's content hash, or the assistant will quote both the 2025 and 2026 fee tables.</div>
 </div>
 </section>
 
@@ -5388,8 +5388,8 @@ print(f"{len(to_ingest)} changed files to ingest")  <span class="cmt"># visibili
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "Your new assistant is showing a teller a compliance-only memo. What went wrong, and where?"</p>
-  <p><strong>A.</strong> The connector dropped the document's ACL at ingest. Access control only works if the <em>who-can-see-this</em> label travels with the chunk from the first step — you cannot bolt it on in the prompt later. The second half they're listening for: re-pull ACLs on <em>every</em> sync (a document whose audience narrows must be re-stamped), and reconcile deletes by tombstoning source ids that stop appearing, or a retracted policy keeps answering forever.</p>
+  <div class="q">Q. "Your new assistant is showing a teller a compliance-only memo. What went wrong, and where?"</div>
+  <div class="a">A. The connector dropped the document's ACL at ingest. Access control only works if the <em>who-can-see-this</em> label travels with the chunk from the first step — you cannot bolt it on in the prompt later. The second half they're listening for: re-pull ACLs on <em>every</em> sync (a document whose audience narrows must be re-stamped), and reconcile deletes by tombstoning source ids that stop appearing, or a retracted policy keeps answering forever.</div>
 </div>
 </section>
 
@@ -5489,8 +5489,8 @@ print(f"dropped {sum(1 for p in pages for ln in p if is_boilerplate(ln))} boiler
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "How do you strip headers and footers across 10,000 PDFs that each use a different footer?"</p>
-  <p><strong>A.</strong> Don't hand-write a regex per footer — use frequency-based detection: any line that repeats on nearly every page of a document (say &gt;80%) is chrome, whatever its wording, so drop it. Pair it with NFKC Unicode normalisation so "don't" matches "don&rsquo;t". The trap they're probing: cleaning must never touch the section path, page number, source or ACL — that metadata is what makes an answer citable and access-controlled.</p>
+  <div class="q">Q. "How do you strip headers and footers across 10,000 PDFs that each use a different footer?"</div>
+  <div class="a">A. Don't hand-write a regex per footer — use frequency-based detection: any line that repeats on nearly every page of a document (say &gt;80%) is chrome, whatever its wording, so drop it. Pair it with NFKC Unicode normalisation so "don't" matches "don&rsquo;t". The trap they're probing: cleaning must never touch the section path, page number, source or ACL — that metadata is what makes an answer citable and access-controlled.</div>
 </div>
 </section>
 
@@ -5584,8 +5584,8 @@ print(parse_health(extracted_pages))               <span class="cmt"># run this 
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "Retrieval accuracy is stuck at 60%. Do you reach for a better embedding model or a reranker first?"</p>
-  <p><strong>A.</strong> Neither — first confirm the correct text is actually in the index, verbatim. Most "retrieval bugs" are parsing bugs wearing a disguise: a scanned page returned an empty string, or a table was flattened to number-soup, and nothing threw an error. Parsing sets a ceiling downstream stages cannot exceed, so you measure extraction quality (empty-page rate, table-structure checks, a gold set) before tuning anything below it.</p>
+  <div class="q">Q. "Retrieval accuracy is stuck at 60%. Do you reach for a better embedding model or a reranker first?"</div>
+  <div class="a">A. Neither — first confirm the correct text is actually in the index, verbatim. Most "retrieval bugs" are parsing bugs wearing a disguise: a scanned page returned an empty string, or a table was flattened to number-soup, and nothing threw an error. Parsing sets a ceiling downstream stages cannot exceed, so you measure extraction quality (empty-page rate, table-structure checks, a gold set) before tuning anything below it.</div>
 </div>
 </section>
 
@@ -5683,8 +5683,8 @@ print("\n".join(rows))                             <span class="cmt"># each line
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "Why store an extracted table as Markdown or HTML rather than plain text, and what single rule makes each row safe to chunk?"</p>
-  <p><strong>A.</strong> Markdown/HTML preserve the structure a model already understands — rows, columns, merged cells survive as pipes or <code>rowspan</code>/<code>colspan</code> — whereas plain text flattens the relationships away. The one rule: repeat the column header into every row, so "6.9%" is never orphaned from "30-year." Bonus points for "never split a table mid-row, and add a one-line NL summary of the table for discovery while keeping the full table as the citation payload."</p>
+  <div class="q">Q. "Why store an extracted table as Markdown or HTML rather than plain text, and what single rule makes each row safe to chunk?"</div>
+  <div class="a">A. Markdown/HTML preserve the structure a model already understands — rows, columns, merged cells survive as pipes or <code>rowspan</code>/<code>colspan</code> — whereas plain text flattens the relationships away. The one rule: repeat the column header into every row, so "6.9%" is never orphaned from "30-year." Bonus points for "never split a table mid-row, and add a one-line NL summary of the table for discovery while keeping the full table as the citation payload."</div>
 </div>
 </section>
 
@@ -5784,8 +5784,8 @@ print(text[:60])                                   <span class="cmt"># peek at t
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "A customer gets a blank answer from a loan agreement you can see contains the clause. What's your first suspect?"</p>
-  <p><strong>A.</strong> A scanned page with no text layer — the extractor returned an empty string and the pipeline indexed nothing, silently. That's why you OCR scans and fail <em>loud</em> when OCR output is near-empty. The depth signal: name the three hard-page types and their cures — multi-column layouts need layout-aware reading, figures/charts need vision captioning (prompted to state every value, and to say "not legible" rather than hallucinate), scans need OCR — and always validate OCR'd account numbers and amounts against lengths and checksums, because 0/O and 1/l/I confusions in finance are catastrophic.</p>
+  <div class="q">Q. "A customer gets a blank answer from a loan agreement you can see contains the clause. What's your first suspect?"</div>
+  <div class="a">A. A scanned page with no text layer — the extractor returned an empty string and the pipeline indexed nothing, silently. That's why you OCR scans and fail <em>loud</em> when OCR output is near-empty. The depth signal: name the three hard-page types and their cures — multi-column layouts need layout-aware reading, figures/charts need vision captioning (prompted to state every value, and to say "not legible" rather than hallucinate), scans need OCR — and always validate OCR'd account numbers and amounts against lengths and checksums, because 0/O and 1/l/I confusions in finance are catastrophic.</div>
 </div>
 </section>
 
@@ -5893,8 +5893,8 @@ def parse_pdf(path):
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "How do you parse a million-page archive accurately without a runaway bill?"</p>
-  <p><strong>A.</strong> A tiered pipeline with fallback: a cheap text extractor (PyMuPDF/pdfium) for the whole corpus, a per-page quality gate, and escalation only of the failures to layout then vision tiers. The number that matters is the <em>escalation rate</em> — it dominates both p95 latency and the monthly bill, so you tune the gate's threshold against a "torture set" of your ugliest pages, not your average ones. Senior-level add-on: record the parser name <em>and version</em> per document, because a parser upgrade silently shifts your chunks and embeddings — treat it as a re-ingestion event, not a swap.</p>
+  <div class="q">Q. "How do you parse a million-page archive accurately without a runaway bill?"</div>
+  <div class="a">A. A tiered pipeline with fallback: a cheap text extractor (PyMuPDF/pdfium) for the whole corpus, a per-page quality gate, and escalation only of the failures to layout then vision tiers. The number that matters is the <em>escalation rate</em> — it dominates both p95 latency and the monthly bill, so you tune the gate's threshold against a "torture set" of your ugliest pages, not your average ones. Senior-level add-on: record the parser name <em>and version</em> per document, because a parser upgrade silently shifts your chunks and embeddings — treat it as a re-ingestion event, not a swap.</div>
 </div>
 </section>
 
@@ -5970,8 +5970,8 @@ print("\n".join(render(record)))                   <span class="cmt"># a flat-bu
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "When should you NOT vector-index JSON at all?"</p>
-  <p><strong>A.</strong> When the real question is an exact lookup by id ("what's customer C7's balance?") or an aggregation — keep the raw typed JSON for direct query, and reserve embeddings for fuzzy, descriptive questions. Never embed volatile fields like balances: a snapshot taken last Tuesday gets quoted as today's fact, which is a reportable error. The subtlety they're testing: stringifying JSON loses its types, so keep the raw typed object alongside any text rendering so downstream code can still do real comparisons like <code>balance &gt; 1000</code>.</p>
+  <div class="q">Q. "When should you NOT vector-index JSON at all?"</div>
+  <div class="a">A. When the real question is an exact lookup by id ("what's customer C7's balance?") or an aggregation — keep the raw typed JSON for direct query, and reserve embeddings for fuzzy, descriptive questions. Never embed volatile fields like balances: a snapshot taken last Tuesday gets quoted as today's fact, which is a reportable error. The subtlety they're testing: stringifying JSON loses its types, so keep the raw typed object alongside any text rendering so downstream code can still do real comparisons like <code>balance &gt; 1000</code>.</div>
 </div>
 </section>
 
@@ -6046,8 +6046,8 @@ for r in rows[1:]:                                 <span class="cmt"># iterate t
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "A manager asks the assistant 'what was total Q3 fee income?' Do you route that through RAG?"</p>
-  <p><strong>A.</strong> No — vector search can't do arithmetic; it will fetch a few rows that look relevant and never sum them. Route aggregation and numeric questions to a query engine (Text-to-SQL or pandas over the structured table) that computes the exact answer, and reserve RAG for "what does the NSF-fee column mean?" definition questions over the data dictionary. The failure-mode they'll push on: multi-row headers and merged cells silently misalign every value by a column and nothing errors, so validate with reconciliation checks (do row subtotals equal the stated total?).</p>
+  <div class="q">Q. "A manager asks the assistant 'what was total Q3 fee income?' Do you route that through RAG?"</div>
+  <div class="a">A. No — vector search can't do arithmetic; it will fetch a few rows that look relevant and never sum them. Route aggregation and numeric questions to a query engine (Text-to-SQL or pandas over the structured table) that computes the exact answer, and reserve RAG for "what does the NSF-fee column mean?" definition questions over the data dictionary. The failure-mode they'll push on: multi-row headers and merged cells silently misalign every value by a column and nothing errors, so validate with reconciliation checks (do row subtotals equal the stated total?).</div>
 </div>
 </section>
 
@@ -6145,8 +6145,8 @@ for i, slide in enumerate(deck.slides, start=1):    <span class="cmt"># one slid
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "What content do teams most often lose when ingesting Office files, and why does it hurt?"</p>
-  <p><strong>A.</strong> PowerPoint <em>speaker notes</em> — the bullets only hint ("Early repayment") while the notes hold the real explanation and the numbers. Drop them and the deck looks ingested but its substance is gone. For Word, keep the heading-style hierarchy: it's a free chunk boundary <em>and</em> the citable breadcrumb ("Credit Policy &gt; 4.2 Valuation"). Watch-out they like to hear: don't blindly index tracked changes and comments as if they were the live policy, and don't convert .docx to PDF first — you throw the structure away and inherit PDF's layout problems.</p>
+  <div class="q">Q. "What content do teams most often lose when ingesting Office files, and why does it hurt?"</div>
+  <div class="a">A. PowerPoint <em>speaker notes</em> — the bullets only hint ("Early repayment") while the notes hold the real explanation and the numbers. Drop them and the deck looks ingested but its substance is gone. For Word, keep the heading-style hierarchy: it's a free chunk boundary <em>and</em> the citable breadcrumb ("Credit Policy &gt; 4.2 Valuation"). Watch-out they like to hear: don't blindly index tracked changes and comments as if they were the live policy, and don't convert .docx to PDF first — you throw the structure away and inherit PDF's layout problems.</div>
 </div>
 </section>
 
@@ -6212,8 +6212,8 @@ print(content[:70])                                 <span class="cmt"># confirm 
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "Why does help-centre retrieval quality collapse if you embed whole raw web pages?"</p>
-  <p><strong>A.</strong> Roughly 80% of each page is shared chrome — the same nav bar, cookie banner and footer — so every chunk looks alike and nothing stands out; the overdraft page can't beat the five pages that merely share its menu. Use readability-style main-content extraction (trafilatura) to keep the article and drop the chrome, and de-dupe locale and near-duplicate copies on content hash or canonical URL. The production nuance to volunteer: detect JavaScript-rendered empty shells and only then pay for a headless browser.</p>
+  <div class="q">Q. "Why does help-centre retrieval quality collapse if you embed whole raw web pages?"</div>
+  <div class="a">A. Roughly 80% of each page is shared chrome — the same nav bar, cookie banner and footer — so every chunk looks alike and nothing stands out; the overdraft page can't beat the five pages that merely share its menu. Use readability-style main-content extraction (trafilatura) to keep the article and drop the chrome, and de-dupe locale and near-duplicate copies on content hash or canonical URL. The production nuance to volunteer: detect JavaScript-rendered empty shells and only then pay for a headless browser.</div>
 </div>
 </section>
 
@@ -6276,8 +6276,8 @@ print(f"camt.053 statement for IBAN {iban}")        <span class="cmt"># render a
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "A partner bank uploads XML to your pipeline. What's the one import that stops a crafted file from reading <code>/etc/passwd</code>?"</p>
-  <p><strong>A.</strong> Importing from <code>defusedxml</code> instead of the stdlib <code>xml.etree.ElementTree</code> or <code>lxml</code> — it disables external-entity resolution (the XXE attack) and caps nested entity-expansion ("billion laughs") bombs, with the same API, safe by construction. The maturity signal: for standards-based banking XML (ISO 20022, FpML, FIXML) parse <em>by the XSD</em>, validate on ingest and dead-letter malformed files, keep the namespace/schema version as metadata, and stream very large feeds with <code>iterparse</code> so you don't OOM on a multi-gigabyte end-of-day message.</p>
+  <div class="q">Q. "A partner bank uploads XML to your pipeline. What's the one import that stops a crafted file from reading <code>/etc/passwd</code>?"</div>
+  <div class="a">A. Importing from <code>defusedxml</code> instead of the stdlib <code>xml.etree.ElementTree</code> or <code>lxml</code> — it disables external-entity resolution (the XXE attack) and caps nested entity-expansion ("billion laughs") bombs, with the same API, safe by construction. The maturity signal: for standards-based banking XML (ISO 20022, FpML, FIXML) parse <em>by the XSD</em>, validate on ingest and dead-letter malformed files, keep the namespace/schema version as metadata, and stream very large feeds with <code>iterparse</code> so you don't OOM on a multi-gigabyte end-of-day message.</div>
 </div>
 </section>
 
@@ -6351,8 +6351,8 @@ print(meta["subject"])                             <span class="cmt"># confirm h
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "Why does indexing each reply in an email thread whole wreck retrieval, and how do you fix it?"</p>
-  <p><strong>A.</strong> Every reply quotes the full history beneath it, so the original complaint gets embedded once per message — five echoes of the question that then dominate the index and crowd out the actual resolution. Split the thread into individual messages, strip quoted history and signatures, store each message once, and recurse into attachments (route a PDF statement to the PDF parser, a spreadsheet to the spreadsheet parser), tagging each with the parent message id. Compliance clincher: redact PII <em>before</em> indexing — a full card number (PAN) in a vector index is a PCI-DSS breach.</p>
+  <div class="q">Q. "Why does indexing each reply in an email thread whole wreck retrieval, and how do you fix it?"</div>
+  <div class="a">A. Every reply quotes the full history beneath it, so the original complaint gets embedded once per message — five echoes of the question that then dominate the index and crowd out the actual resolution. Split the thread into individual messages, strip quoted history and signatures, store each message once, and recurse into attachments (route a PDF statement to the PDF parser, a spreadsheet to the spreadsheet parser), tagging each with the parent message id. Compliance clincher: redact PII <em>before</em> indexing — a full card number (PAN) in a vector index is a PCI-DSS breach.</div>
 </div>
 </section>
 
@@ -6425,8 +6425,8 @@ with engine.connect() as conn:                     <span class="cmt"># context m
 </div>
 
 <div class="qa">
-  <p><strong>Q (interview).</strong> "When do you embed data from the core-banking database, and when do you query it live?"</p>
-  <p><strong>A.</strong> Embed slow-changing, descriptive data worth a semantic search — product terms, fee schedules, branch hours (Path A) — and query fast-changing or customer-specific facts live at question time — balances, transactions, today's rate, card status (Path B). Embedding a balance is the single most common way a RAG system gives a confidently wrong number. The security answer they're really after: the model must never emit free-form SQL — expose a small set of parameterised, read-only queries (or one tool per allowed question), run them as a least-privilege user against a read replica, and enforce row-level security at the database tied to the authenticated customer. Filtering results in the prompt is not access control.</p>
+  <div class="q">Q. "When do you embed data from the core-banking database, and when do you query it live?"</div>
+  <div class="a">A. Embed slow-changing, descriptive data worth a semantic search — product terms, fee schedules, branch hours (Path A) — and query fast-changing or customer-specific facts live at question time — balances, transactions, today's rate, card status (Path B). Embedding a balance is the single most common way a RAG system gives a confidently wrong number. The security answer they're really after: the model must never emit free-form SQL — expose a small set of parameterised, read-only queries (or one tool per allowed question), run them as a least-privilege user against a read replica, and enforce row-level security at the database tied to the authenticated customer. Filtering results in the prompt is not access control.</div>
 </div>
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
