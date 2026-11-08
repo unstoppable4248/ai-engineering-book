@@ -56,6 +56,8 @@ p,li,td,th,h1,h2,h3,h4,.lede,.part-intro,figcaption{overflow-wrap:break-word}
 .theme-toggle{flex:0 0 auto;width:34px;height:34px;border-radius:9px;border:1px solid var(--line);background:var(--bg);
   color:var(--ink);font-size:16px;line-height:1;cursor:pointer}
 .theme-toggle:hover{background:var(--accent-soft);border-color:var(--accent)}
+.brand-btns{flex:0 0 auto;display:flex;gap:6px}
+.reset-btn:hover{background:var(--amber-soft);border-color:var(--amber);color:var(--amber)}
 .nav-controls{display:flex;gap:6px;padding:6px 16px 2px}
 .nav-controls button{flex:1;padding:5px 8px;border:1px solid var(--line);border-radius:7px;background:var(--bg);
   color:var(--muted);font:600 11px/1.3 "SFMono-Regular",Consolas,monospace;cursor:pointer}
@@ -270,7 +272,10 @@ tr:last-child td{border-bottom:0}
         <div class="brand-kicker">Banking Edition · 2026</div>
         <div class="brand-title">📘 AI Engineering <span>Textbook</span></div>
       </div>
-      <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle light/dark mode" title="Toggle light/dark">🌙</button>
+      <div class="brand-btns">
+        <button id="resetBtn" class="theme-toggle reset-btn" type="button" aria-label="Reset to default: clear saved theme, sidebar and reading position" title="Reset to default — clears saved settings &amp; reading position">🗑</button>
+        <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle light/dark mode" title="Toggle light/dark">🌙</button>
+      </div>
     </div>
   </div>
   <div class="search-box"><input id="q" type="search" placeholder="🔍 Search topics…  (press /)" autocomplete="off"></div>
@@ -35172,6 +35177,48 @@ Qwen3-32B sharded: ~4.1 GB params / GPU (was ~64 GB unsharded)
     body.classList.toggle('nav-collapsed');
     try{localStorage.setItem('aitb-nav', body.classList.contains('nav-collapsed')?'collapsed':'open');}catch(e){}
     lbl();
+  });
+})();
+
+/* Remember the reading position and restore it on reopen */
+(function(){
+  var KEY='aitb-scroll';
+  function curY(){return window.scrollY||document.documentElement.scrollTop||0;}
+  var saved=null; try{saved=parseFloat(localStorage.getItem(KEY));}catch(e){}
+  if(saved!=null && !isNaN(saved) && saved>0){
+    var root=document.documentElement, prev=root.style.scrollBehavior;
+    root.style.scrollBehavior='auto';                 // jump straight there, don't animate the whole page
+    function restore(){ window.scrollTo(0,saved); }
+    restore();                                         // DOM is parsed (script is at end of body)
+    window.addEventListener('load',function(){         // ...and again once every figure/font settles
+      restore();
+      setTimeout(function(){restore();root.style.scrollBehavior=prev||'';},80);
+    });
+  }
+  var t=null;
+  window.addEventListener('scroll',function(){         // throttle writes so we don't hammer storage
+    if(t)return;
+    t=setTimeout(function(){t=null; if(window.__aitbReset)return;
+      try{localStorage.setItem(KEY,String(curY()));}catch(e){}
+    },250);
+  },{passive:true});
+  window.addEventListener('beforeunload',function(){
+    if(window.__aitbReset)return;                       // a reset is wiping state — don't re-save
+    try{localStorage.setItem(KEY,String(curY()));}catch(e){}
+  });
+})();
+
+/* Reset-to-default button: clear saved theme, sidebar state and reading position */
+(function(){
+  var btn=document.getElementById('resetBtn');
+  if(!btn) return;
+  btn.addEventListener('click',function(){
+    if(!window.confirm('Reset to default? This clears the saved theme, sidebar state and reading position for this book.')) return;
+    window.__aitbReset=true;                            // stop the scroll saver from re-writing during reload
+    try{ localStorage.removeItem('aitb-theme'); localStorage.removeItem('aitb-nav'); localStorage.removeItem('aitb-scroll'); }catch(e){}
+    try{ localStorage.clear(); }catch(e){}              // wipe anything else this page saved
+    try{ var u=location.href.split('#')[0]; history.replaceState(null,'',u); }catch(e){}
+    location.reload();
   });
 })();
 
