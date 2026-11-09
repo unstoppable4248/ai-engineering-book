@@ -3934,7 +3934,7 @@ print(resp.choices[0].message.content)    <span class="cmt"># the grounded, quot
 
 <div class="card">
   <div class="lbl">⚙️ In production — the real cost shapes</div>
-  <p>The three options have very different bills. <strong>RAG:</strong> a small, steady cost per query (the extra retrieved tokens) plus a tiny cost to update knowledge (re-embed changed chunks). <strong>Long-context:</strong> no index to maintain, but you pay for the pasted knowledge <em>on every single call</em> — pasting a 300-page manual (roughly 400,000 tokens) into every question is both slow and, at scale, eye-watering; and models attend worst to the middle of a huge input, so the one line you needed may be skimmed. <strong>Fine-tuning:</strong> a large one-off training cost and the ongoing discipline of re-training when the world changes — plus a governance burden, because a bank must document and risk-assess any model whose weights it altered. A mature BankAssist stacks all three: fine-tune the house tone and strict output format once, use RAG for every changing fact, and reserve long-context for the occasional short document.</p>
+  <p>The three options have very different bills. <strong>RAG:</strong> a small, steady cost per query (the extra retrieved tokens) plus a tiny cost to update knowledge (re-embed changed chunks). <strong>Long-context:</strong> no index to maintain, but you pay for the pasted knowledge <em>on every single call</em> — pasting a 300-page manual (roughly 150,000 tokens) into every question is both slow and, at scale, eye-watering; and models attend worst to the middle of a huge input, so the one line you needed may be skimmed. <strong>Fine-tuning:</strong> a large one-off training cost and the ongoing discipline of re-training when the world changes — plus a governance burden, because a bank must document and risk-assess any model whose weights it altered. A mature BankAssist stacks all three: fine-tune the house tone and strict output format once, use RAG for every changing fact, and reserve long-context for the occasional short document.</p>
 </div>
 
 <div class="warn">
@@ -4402,6 +4402,17 @@ print(len(vector), vector[:3])     <span class="cmt"># show how many numbers, an
   <li><strong>Index</strong> — store those vectors (plus the original text and its metadata) in a database built for fast similarity search.</li>
 </ul>
 
+<div class="tipbox">
+  <div class="lbl">✅ A note on the word "index"</div>
+  <p>"Index" gets used three ways, and they trip people up in interviews:</p>
+  <ul>
+    <li><strong>Ingestion</strong> — the <em>whole</em> offline pipeline above (Source → … → Index). Getting knowledge in.</li>
+    <li><strong>Indexing</strong> (the verb / the last station) — the <em>step</em> of writing the chunks and vectors into the store. People often say "the indexing pipeline" loosely to mean the entire ingestion flow.</li>
+    <li><strong>An index</strong> (the noun — the database sense) — the actual search <em>data structure</em> that makes lookup fast, exactly like an index on a database column. For vectors that's an <strong>HNSW</strong> or <strong>IVF</strong> index (covered in the Embeddings &amp; Vector Search chapter); for keywords it's an inverted index. You "build an index" so you don't scan every row.</li>
+  </ul>
+  <p>So: <strong>ingestion</strong> is the job, <strong>indexing</strong> is the storing step within it, and <strong>the index</strong> is the structure you end up querying. Ingestion ⊇ indexing, and the index is what indexing produces.</p>
+</div>
+
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
   <p>BankAssist ingests the 48-page <em>Home Loan Terms 2026</em> PDF. Parsing reads page 12, where an early-closure fee table lives. Cleaning drops the "Page 12 of 48" footer. Chunking keeps that fee table together as one passage. Embedding captures its meaning. Indexing files it. Weeks later a customer asks about early-closure fees, and that one passage surfaces in milliseconds — with a citation back to "page 12 of Home Loan Terms 2026." The customer gets a real, checkable answer.</p>
@@ -4427,6 +4438,95 @@ print(len(vector), vector[:3])     <span class="cmt"># show how many numbers, an
 
 <h4>Going deeper — batch vs. streaming, and the re-ingestion problem</h4>
 <p>Two shapes of pipeline exist, and banks use both. A <strong>batch</strong> pipeline wakes on a schedule (say, nightly) and re-checks every source — simple, cheap, and perfect for policy PDFs that change monthly. A <strong>streaming</strong> pipeline reacts to events (a "document uploaded" webhook from SharePoint, a new row in a change feed) and ingests within seconds — needed when freshness matters, like a rates sheet that must be searchable the minute it's published. The hard part neither shape escapes is <strong>re-ingestion</strong>: when a document changes, its old chunks must be <em>deleted</em> from the index before the new ones land, or the assistant will retrieve both the 2025 and 2026 fee tables and quote whichever it likes. The manifest's content hash is what makes this tractable — same hash, skip; new hash, delete-then-reindex by source id.</p>
+
+<h4>How to update a document in a RAG index — the exact steps</h4>
+<p>When a policy PDF is re-published, you don't "edit" the index — you replace that document's slice of it. The whole procedure is six steps, and the order matters: <strong>delete before you insert</strong>, or the index briefly holds two versions and retrieval mixes them.</p>
+<ol>
+  <li><strong>Hash &amp; compare.</strong> Compute the new content hash (e.g. SHA-256 of the bytes) and look it up in the manifest by <code>source_id</code>. Same hash ⇒ nothing changed, <em>skip</em> — this is what makes re-runs idempotent and cheap. (The same exact hash is also how you catch <strong>duplicates</strong>: two files with one hash are one document.)</li>
+  <li><strong>Delete the old chunks</strong> for that <code>source_id</code> from the vector store (a metadata-filter delete), so no stale version can be retrieved.</li>
+  <li><strong>Re-parse → clean → chunk</strong> the new version (the same first three stations as a first-time ingest).</li>
+  <li><strong>Embed</strong> the new chunks.</li>
+  <li><strong>Upsert</strong> the new chunks, each tagged with <code>source_id</code>, a version stamp, and its text — the identity you'll need for the <em>next</em> update and for citations.</li>
+  <li><strong>Record &amp; verify.</strong> Write the new hash, parser version and timestamp to the manifest (your audit trail), then confirm only the new version is retrievable and emit the counts (chunks deleted / written).</li>
+</ol>
+
+<pre><code>import hashlib
+
+def content_hash(data: bytes) -&gt; str:
+    return hashlib.sha256(data).hexdigest()          <span class="cmt"># a stable fingerprint of the bytes</span>
+
+def update_document(source_id, raw_bytes, manifest, store):
+    new_hash = content_hash(raw_bytes)
+    old = manifest.get(source_id)                    <span class="cmt"># the last version we indexed, if any</span>
+
+    <span class="cmt"># 1) unchanged (or a duplicate of what we already have) → do nothing</span>
+    if old and old["hash"] == new_hash:
+        return "skip"
+
+    <span class="cmt"># 2) delete OLD chunks FIRST, so the index never holds two versions at once</span>
+    store.delete(filter={"source_id": source_id})
+
+    <span class="cmt"># 3-4) re-parse → clean → chunk → embed the NEW version</span>
+    chunks  = chunk(clean(parse(raw_bytes)))
+    vectors = embed([c.text for c in chunks])
+
+    <span class="cmt"># 5) upsert new chunks, each tagged for the NEXT update and for citations</span>
+    store.upsert([
+        {"id": f"{source_id}:{i}", "values": v,
+         "metadata": {"source_id": source_id, "version": new_hash[:12], "text": c.text}}
+        for i, (c, v) in enumerate(zip(chunks, vectors))
+    ])
+
+    <span class="cmt"># 6) record the new state (audit trail + next-run hash compare)</span>
+    manifest.put(source_id, {"hash": new_hash, "parser": PARSER_VERSION, "ts": now()})
+    return f"reindexed {len(chunks)} chunks"
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div>reindexed 42 chunks</div>
+
+<div class="tipbox">
+  <div class="lbl">✅ Tip</div>
+  <p>For a <strong>deleted</strong> source document, run only step 2 (delete by <code>source_id</code>) and drop its manifest row — there's nothing to re-insert. And make the whole function safe to retry: if a crash lands between delete and upsert, the next run simply re-does both, because the manifest only advances once step 6 succeeds.</p>
+</div>
+
+<h4>Updating the whole PDF vs. just the part that changed</h4>
+<p>The six steps above replace the <em>entire</em> document — delete all its chunks, re-ingest from scratch. That <strong>whole-document replace</strong> is the simplest and safest default, and the right choice almost all the time (a document hash changed, so re-do it). But when a document is <em>very large and edited often but only a little</em> — a 500-page product manual where one page is corrected overnight — re-embedding all 1,200 chunks to change three is wasteful. Then you switch to a <strong>chunk-level (partial) update</strong>:</p>
+<ol>
+  <li><strong>Re-chunk</strong> the new version and compute a hash <em>per chunk</em> (not just one hash for the whole file).</li>
+  <li><strong>Diff</strong> against the stored chunk hashes for that <code>source_id</code>: <strong>delete</strong> the chunks whose hash disappeared, <strong>embed + upsert</strong> only the chunks whose hash is new, and <strong>leave untouched</strong> every chunk whose hash is unchanged — so you pay to embed three chunks, not twelve hundred.</li>
+</ol>
+
+<pre><code><span class="cmt"># The trick: make each chunk's id BE its content hash, so diffing is just set math.</span>
+def chunk_id(source_id, text):
+    return f"{source_id}:{content_hash(text.encode())[:12]}"   <span class="cmt"># same text → same id</span>
+
+def update_document_partial(source_id, raw_bytes, store):
+    new_chunks = chunk(clean(parse(raw_bytes)))                <span class="cmt"># re-chunk the NEW version</span>
+    new_by_id  = {chunk_id(source_id, c.text): c for c in new_chunks}
+
+    old_ids = set(store.list_ids(filter={"source_id": source_id}))  <span class="cmt"># what's already indexed</span>
+    new_ids = set(new_by_id)
+
+    to_add    = new_ids - old_ids      <span class="cmt"># new or edited chunks → embed these</span>
+    to_delete = old_ids - new_ids      <span class="cmt"># removed or edited-away chunks → drop these</span>
+    unchanged = old_ids &amp; new_ids      <span class="cmt"># identical hash → leave as-is, no embed, no write</span>
+
+    if to_delete:
+        store.delete(ids=list(to_delete))                     <span class="cmt"># remove only the stale ids</span>
+    if to_add:
+        texts   = [new_by_id[i].text for i in to_add]
+        vectors = embed(texts)                                <span class="cmt"># embed ONLY the changed chunks</span>
+        store.upsert([
+            {"id": i, "values": v, "metadata": {"source_id": source_id, "text": t}}
+            for i, v, t in zip(to_add, vectors, texts)
+        ])
+    return f"+{len(to_add)} -{len(to_delete)} (unchanged {len(unchanged)})"
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div>+3 -3 (unchanged 1197)</div>
+
+<div class="warn">
+  <div class="lbl">⚠ Watch out</div>
+  <p>The catch with partial updates is <strong>chunk boundaries shift</strong>. Insert one sentence on page 2 and every chunk after it can re-flow, so a genuine one-line edit looks like "everything changed" to a naive hash-diff — and you've saved nothing. Two defences: use <strong>structure-aware chunking</strong> (split on stable headings/sections so an edit stays inside its own section), and <strong>fall back to whole-document replace</strong> when the diff touches most of the doc. Rule of thumb: <em>whole-document replace by default; chunk-level only for big documents with localised edits and stable section boundaries.</em></p>
+</div>
 
 <div class="card">
   <div class="lbl">⚙️ In production</div>
@@ -6661,9 +6761,9 @@ q = query / np.linalg.norm(query)                   <span class="cmt"># normaliz
 f = fee   / np.linalg.norm(fee)                     <span class="cmt"># once both are length 1...</span>
 print("dot(normalized):", round(q @ f, 3))          <span class="cmt"># ...plain dot product now equals cosine — but faster</span>
 </code></pre>
-<div class="out"><div class="lbl">▶ Output</div>fee  : 0.999<br>mort : -0.047<br>dot(normalized): 0.999</div>
+<div class="out"><div class="lbl">▶ Output</div>fee  : 0.999<br>mort : -0.153<br>dot(normalized): 0.999</div>
 
-<p>The fee chunk scores almost a perfect 1.0; the mortgage chunk scores near zero. And see the last line: once both vectors are normalized, the bare dot product (<code>q @ f</code>) gives the <em>same</em> 0.999 as cosine. That's the production shortcut in a nutshell.</p>
+<p>The fee chunk scores almost a perfect 1.0; the mortgage chunk scores low (slightly negative — it points a different way). And see the last line: once both vectors are normalized, the bare dot product (<code>q @ f</code>) gives the <em>same</em> 0.999 as cosine. That's the production shortcut in a nutshell.</p>
 
 <table>
 <tr><th>Ruler</th><th>Cares about length?</th><th>Use it when…</th></tr>
@@ -7009,7 +7109,7 @@ print(round(float(score), 3))                            <span class="cmt"># hig
 <p>At scale, the dominant cost of a vector search system is <em>memory</em> — millions of vectors, each a long list of high-precision numbers, held in RAM for speed. Two independent levers shrink that bill. They stack.</p>
 
 <h4>Matryoshka embeddings — one model, many sizes</h4>
-<p>Named after Russian nesting dolls, <strong>Matryoshka Representation Learning (MRL)</strong> trains a model so that the <em>first</em> chunk of each vector is itself a complete, usable embedding. A 1536-dim vector from <code>text-embedding-3-large</code> can be cut to its first 512 — or 256 — numbers and still work well, because the most important meaning was packed into the front. You don't re-embed anything; you just keep fewer numbers. That's how OpenAI's <code>dimensions</code> parameter works, and why Nomic can hand you anything from 768 down to 64.</p>
+<p>Named after Russian nesting dolls, <strong>Matryoshka Representation Learning (MRL)</strong> trains a model so that the <em>first</em> chunk of each vector is itself a complete, usable embedding. A 3072-dim vector from <code>text-embedding-3-large</code> can be cut to its first 512 — or 256 — numbers and still work well, because the most important meaning was packed into the front. You don't re-embed anything; you just keep fewer numbers. That's how OpenAI's <code>dimensions</code> parameter works, and why Nomic can hand you anything from 768 down to 64.</p>
 
 <pre><code><span class="cmt"># Ask OpenAI for a SHORTER vector to save storage — Matryoshka in action.</span>
 from openai import OpenAI                     <span class="cmt"># official OpenAI client</span>
@@ -10062,6 +10162,9 @@ for t in resp.output_parsed.triples:            <span class="cmt"># resp.output_
 <h4>MRR (how high was the <em>first</em> relevant chunk?)</h4>
 <p><strong>Mean Reciprocal Rank</strong> rewards putting a relevant chunk near the top. For one query it's simply 1 ÷ (rank of the first relevant result). Our first relevant chunk sits at rank 2, so the reciprocal rank is <strong>1 / 2 = 0.5</strong>. MRR is the average of that across all your queries. If the right chunk had been at rank 1, you'd score 1.0; at rank 10, just 0.1. It captures "how far does the reader have to dig?"</p>
 
+<h4>MAP (average precision across the whole ranking)</h4>
+<p><strong>Mean Average Precision</strong> sits between MRR and NDCG. Where MRR only looks at the <em>first</em> relevant hit, MAP rewards getting <em>every</em> relevant chunk high. For one query you compute <strong>Average Precision (AP)</strong>: walk down the list, and each time you land on a relevant chunk, note the precision <em>up to that point</em>, then average those readings. Our two relevant chunks sit at ranks 2 and 4 — precision is <strong>1/2 = 0.5</strong> at rank 2 and <strong>2/4 = 0.5</strong> at rank 4, so AP = (0.5 + 0.5) / 2 = <strong>0.5</strong>. <strong>MAP</strong> is the mean of that AP across all your queries. It's the classic single-number ranking score in information retrieval — stricter than MRR (it cares about <em>all</em> the relevant hits, not just the first), but simpler than NDCG (plain relevant/not, no graded labels or log discount).</p>
+
 <h4>NDCG (the full ranking grade)</h4>
 <p><strong>NDCG</strong> (Normalised Discounted Cumulative Gain) is the richest metric: it rewards relevant chunks <em>and</em> penalises them for sitting low in the list, using a gentle logarithmic discount. It comes in two steps.</p>
 <p>First, <strong>DCG</strong> (the gain we actually got). Each relevant chunk contributes <code>1 / log2(rank + 1)</code>. Our relevant chunks are at ranks 2 and 4:</p>
@@ -10098,17 +10201,25 @@ precision = sum(relevant_flags) / len(relevant_flags)  <span class="cmt"># fract
 first_hit = next(i for i, r in enumerate(relevant_flags, start=1) if r)  <span class="cmt"># rank of first relevant (=2)</span>
 mrr = 1 / first_hit                           <span class="cmt"># reciprocal of that rank</span>
 
+<span class="cmt"># AP: average the precision measured at each rank where a relevant chunk appears.</span>
+hits, precisions = 0, []
+for rank, r in enumerate(relevant_flags, start=1):
+    if r:
+        hits += 1
+        precisions.append(hits / rank)        <span class="cmt"># precision up to this relevant hit</span>
+ap = sum(precisions) / total_relevant         <span class="cmt"># AP for THIS query; MAP = mean of AP over all queries</span>
+
 <span class="cmt"># DCG: each relevant chunk adds 1/log2(rank+1); irrelevant chunks add nothing.</span>
 dcg = sum(r / math.log2(rank + 1) for rank, r in enumerate(relevant_flags, start=1))
 <span class="cmt"># IDCG: the ideal is all relevant chunks packed at the top (ranks 1,2,...).</span>
 idcg = sum(1 / math.log2(rank + 1) for rank in range(1, total_relevant + 1))
 ndcg = dcg / idcg                             <span class="cmt"># rescale so a perfect ranking = 1.0</span>
 
-print(f"hit={hit_rate} recall={recall} prec={precision} mrr={mrr} ndcg={ndcg:.3f}")
+print(f"hit={hit_rate} recall={recall} prec={precision} mrr={mrr} map={ap} ndcg={ndcg:.3f}")
 </code></pre>
-<div class="out"><div class="lbl">▶ Output</div>hit=1 recall=1.0 prec=0.4 mrr=0.5 ndcg=0.651</div>
+<div class="out"><div class="lbl">▶ Output</div>hit=1 recall=1.0 prec=0.4 mrr=0.5 map=0.5 ndcg=0.651</div>
 
-<p>The numbers tell a story at a glance: we <em>found</em> everything (recall 1.0, the ceiling is fine) but we <em>ranked</em> it poorly (precision 0.4, MRR 0.5, NDCG 0.65). The fix here is a reranker to push the relevant chunks up, not a change to the embeddings.</p>
+<p>The numbers tell a story at a glance: we <em>found</em> everything (recall 1.0, the ceiling is fine) but we <em>ranked</em> it poorly (precision 0.4, MRR 0.5, MAP 0.5, NDCG 0.65). The fix here is a reranker to push the relevant chunks up, not a change to the embeddings.</p>
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood — picking your k, and graded relevance</div>
