@@ -32524,7 +32524,7 @@ print(resp.choices[0].message.content)            <span class="cmt"># answer ser
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood — the quota model is moving</div>
-  <p>Capacity on Azure is governed by <strong>TPM (tokens-per-minute)</strong> and <strong>RPM (requests-per-minute)</strong> quotas, per subscription and region. This layer is actively changing: Microsoft has been moving toward <strong>subscription-level shared quota pools</strong> (reported for 2026), and the older "dynamic quota" concept has been removed. Because these mechanics shift, verify current quota behaviour on Microsoft Learn before you build capacity planning around a specific number — and always handle <code>429</code> responses with retry-and-backoff regardless of your quota tier.</p>
+  <p>Capacity on Azure is governed by <strong>TPM (tokens-per-minute)</strong> and <strong>RPM (requests-per-minute)</strong> quotas, per subscription and region. TPM is the limit on how many tokens a model deployment will process in one minute: on Azure you <strong>assign it per deployment</strong> out of that per-subscription, per-region pool, whereas on OpenAI it's set <strong>per organization and usage tier</strong>. This layer is actively changing: Microsoft has been moving toward <strong>subscription-level shared quota pools</strong> (reported for 2026), and the older "dynamic quota" concept has been removed. Because these mechanics shift, verify current quota behaviour on Microsoft Learn before you build capacity planning around a specific number — and always handle <code>429</code> responses with retry-and-backoff regardless of your quota tier.</p>
 </div>
 
 <div class="warn">
