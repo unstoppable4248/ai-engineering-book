@@ -337,7 +337,6 @@ tr:last-child td{border-bottom:0}
   <p class="lede"><strong>A note on the code</strong></p>
   <p>Code examples use the OpenAI API by default, with other providers shown where they add real value, and keep to current, non-deprecated interfaces; every meaningful line is commented with the reason it is there. Figures and amounts use a single currency for clarity. This book teaches engineering, not financial or legal practice — regulatory specifics vary by jurisdiction and change over time, so treat them as a starting point and confirm the current rules for your own setting.</p>
 </section>
-
 <h2 class="part">Foundations — LLMs, prompting &amp; how agents think</h2>
 <p class="part-intro">Before we wire up tools, memory, or retrieval, let's get a clear and honest picture of the "brain" every AI feature sits on top of — what it really is, how you steer it, and where it can quietly let you down.</p>
 
@@ -2739,7 +2738,6 @@ weighted avg       0.99      0.99      0.99      5000
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🤖 classical ML</span> <span class="chip">📏 metrics</span> <span class="chip">🏭 production</span></p>
 </section>
-
 <h2 class="part">Foundations — Inside the Model: Transformers, Attention &amp; MoE</h2>
 <p class="part-intro">We've treated the model as a clever black box that guesses the next word. Now let's open the box — gently — and see the machinery interviewers love to probe: how a transformer turns text into an answer, what "attention" really does, how the model knows word order, the cache that makes chat fast, and why the biggest 2026 models only switch on a sliver of themselves per word.</p>
 
@@ -3529,7 +3527,6 @@ print(resp.output_text)                                <span class="cmt"># the m
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🖼️ multimodal</span></p>
 </section>
-
 <h2 class="part">Knowledge Layer (RAG) — Why RAG &amp; the big picture</h2>
 <p class="part-intro">Before you build anything, let's get a clear, calm picture of what RAG is, why so many banking teams reach for it first, and where it quietly falls short — told as a story, in plain words.</p>
 
@@ -3603,15 +3600,18 @@ print(resp.output_text)                                <span class="cmt"># the m
 from openai import OpenAI                 <span class="cmt"># official OpenAI Python client</span>
 client = OpenAI()                         <span class="cmt"># reads your API key from the environment</span>
 
-retrieved = [                             <span class="cmt"># the chunks the retriever already found (the "open book")</span>
-    "Overdraft item fee: $35 per item.",
-    "One courtesy overdraft waiver is allowed per 12 months on request.",
+retrieved = [                             <span class="cmt"># each chunk the retriever found, WITH where it came from</span>
+    {"text": "Overdraft item fee: $35 per item.",
+     "source": "Deposit Account Agreement §4.2"},
+    {"text": "One courtesy overdraft waiver is allowed per 12 months on request.",
+     "source": "Deposit Account Agreement §4.3"},
 ]
 question = "How much is the overdraft fee, and can it be waived?"  <span class="cmt"># the customer's question</span>
 
-context = "\n".join(retrieved)            <span class="cmt"># stitch the chunks into one block of text</span>
+context = "\n".join(f"[{c['source']}] {c['text']}" for c in retrieved)  <span class="cmt"># tag each line with its source</span>
 prompt = (                                <span class="cmt"># the augmented prompt: context THEN question</span>
-    "Answer ONLY from the context below. If it is not there, say you don't know.\n\n"
+    "Answer ONLY from the context below, and cite the source in [brackets]. "
+    "If the answer is not there, say you don't know.\n\n"
     f"Context:\n{context}\n\nQuestion: {question}"
 )
 
@@ -3621,9 +3621,9 @@ resp = client.chat.completions.create(    <span class="cmt"># the generation cal
 )
 print(resp.choices[0].message.content)    <span class="cmt"># the grounded, quotable answer</span>
 </code></pre>
-<div class="out"><div class="lbl">▶ Output</div>The overdraft item fee is $35 per item. It can be waived once every 12 months as a courtesy, on request.</div>
+<div class="out"><div class="lbl">▶ Output</div>The overdraft item fee is $35 per item [Deposit Account Agreement §4.2]. It can be waived once every 12 months as a courtesy, on request [Deposit Account Agreement §4.3].</div>
 
-<p>That is the whole "augmented generation" step: the model never reaches into its hazy memory because the facts sit right there in the prompt, and the line "answer only from the context" tells it to stay on the page. Swap the two retrieved strings for the real output of a search, and you have RAG.</p>
+<p>That is the whole end-to-end flow in one place: the question comes in, the retriever hands over the right chunks (<em>retrieve</em>), they go into the prompt so the model answers from them (<em>ground</em>), the model writes the reply (<em>answer</em>), and because each chunk carried its source the reply ends with a traceable citation (<em>cite</em>). The model never reaches into its hazy memory because the facts sit right there in the prompt, and the line "answer only from the context" keeps it on the page. Swap the two retrieved chunks for the real output of a search, and you have RAG.</p>
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood — the open book has a catch</div>
@@ -3632,7 +3632,7 @@ print(resp.choices[0].message.content)    <span class="cmt"># the grounded, quot
 
 <div class="card">
   <div class="lbl">⚙️ In production</div>
-  <p><strong>Cost &amp; latency:</strong> each answer now pays for the retrieved tokens too. Five 150-word chunks add roughly 1,000 tokens to every prompt — a fraction of a cent per call, but at a million calls a month it is a real line item, so you cap how many chunks you paste. <strong>Scale:</strong> the generation call is stateless (each call stands alone and remembers nothing), so it scales out easily; the retriever is the part you size for traffic. <strong>Failure modes:</strong> the retriever returns nothing (answer "I don't know" rather than invent), or returns off-topic text (the model is politely, fluently wrong). <strong>Monitoring:</strong> a bank logs, for every answer, which chunks were used and whether the model stayed grounded, so a wrong answer can be traced back to a wrong fetch. <strong>Security:</strong> retrieved text is untrusted input; a poisoned document could hide instructions, so the prompt must treat context as data to read, never as commands to obey.</p>
+  <p><strong>Cost &amp; latency:</strong> each answer now pays for the retrieved tokens too. Five 150-word chunks add roughly 1,000 tokens (a <em>token</em> is a piece of text the model counts in, about ¾ of a word, so 1,000 tokens is roughly 750 words) to every prompt — a fraction of a cent per call, but at a million calls a month it is a real line item, so you cap how many chunks you paste. <strong>Scale:</strong> the generation call is stateless (each call stands alone and remembers nothing), so it scales out easily; the retriever is the part you size for traffic. <strong>Failure modes:</strong> the retriever returns nothing (answer "I don't know" rather than invent), or returns off-topic text (the model is politely, fluently wrong). <strong>Monitoring:</strong> a bank logs, for every answer, which chunks were used and whether the model stayed grounded, so a wrong answer can be traced back to a wrong fetch. <strong>Security:</strong> retrieved text is untrusted input; a poisoned document could hide instructions, so the prompt must treat context as data to read, never as commands to obey.</p>
 </div>
 
 <div class="warn">
@@ -3860,7 +3860,7 @@ print(resp.choices[0].message.content)    <span class="cmt"># the grounded, quot
 
 <ul>
 <li><strong>RAG</strong> — look facts up at answer time and let the model read them. Think "open book."</li>
-<li><strong>Fine-tuning</strong> — keep training the model on your examples so new behaviour is baked into its weights. Think "sending it to school."</li>
+<li><strong>Fine-tuning</strong> — keep training the model on your examples so new behaviour is baked into its weights (the millions of internal numbers the model learned during training — think of them as its built-in memory). Think "sending it to school."</li>
 <li><strong>Long-context</strong> — skip retrieval and just paste <em>everything</em> into one very large prompt, because modern models accept huge inputs. Think "dump the whole binder on the desk."</li>
 </ul>
 
@@ -4335,7 +4335,6 @@ print(len(vector), vector[:3])     <span class="cmt"># show how many numbers, an
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
-
 <h2 class="part">Knowledge Layer (RAG) — Ingestion &amp; Parsing</h2>
 <p class="part-intro">Before an AI assistant can answer a single question about your bank, someone has to carry the bank's knowledge — out of PDFs, spreadsheets, wikis and core systems — into a shape a machine can search. This chapter is about that quiet, unglamorous, make-or-break first mile.</p>
 
@@ -4436,103 +4435,11 @@ print(len(vector), vector[:3])     <span class="cmt"># show how many numbers, an
   <p>Teams love to tune embeddings and rerankers while quietly ignoring parsing and cleaning. That's polishing the windows of a house with no foundation. Spend your first week of effort on getting clean, well-structured text out of your hardest documents.</p>
 </div>
 
-<h4>Going deeper — batch vs. streaming, and the re-ingestion problem</h4>
-<p>Two shapes of pipeline exist, and banks use both. A <strong>batch</strong> pipeline wakes on a schedule (say, nightly) and re-checks every source — simple, cheap, and perfect for policy PDFs that change monthly. A <strong>streaming</strong> pipeline reacts to events (a "document uploaded" webhook from SharePoint, a new row in a change feed) and ingests within seconds — needed when freshness matters, like a rates sheet that must be searchable the minute it's published. The hard part neither shape escapes is <strong>re-ingestion</strong>: when a document changes, its old chunks must be <em>deleted</em> from the index before the new ones land, or the assistant will retrieve both the 2025 and 2026 fee tables and quote whichever it likes. The manifest's content hash is what makes this manageable — same hash, skip; new hash, delete-then-reindex by source id.</p>
-
-<h4>How to update a document in a RAG index — the exact steps</h4>
-<p>When a policy PDF is re-published, you don't "edit" the index — you replace that document's slice of it. The whole procedure is six steps, and the order matters: <strong>delete before you insert</strong>, or the index briefly holds two versions and retrieval mixes them.</p>
-<ol>
-  <li><strong>Hash &amp; compare.</strong> Compute the new content hash (e.g. SHA-256 of the bytes) and look it up in the manifest by <code>source_id</code>. Same hash ⇒ nothing changed, <em>skip</em> — this is what makes re-runs idempotent and cheap. (The same exact hash is also how you catch <strong>duplicates</strong>: two files with one hash are one document.)</li>
-  <li><strong>Delete the old chunks</strong> for that <code>source_id</code> from the vector store (a metadata-filter delete), so no stale version can be retrieved.</li>
-  <li><strong>Re-parse → clean → chunk</strong> the new version (the same first three stations as a first-time ingest).</li>
-  <li><strong>Embed</strong> the new chunks.</li>
-  <li><strong>Upsert</strong> the new chunks, each tagged with <code>source_id</code>, a version stamp, and its text — the identity you'll need for the <em>next</em> update and for citations.</li>
-  <li><strong>Record &amp; verify.</strong> Write the new hash, parser version and timestamp to the manifest (your audit trail), then confirm only the new version is retrievable and emit the counts (chunks deleted / written).</li>
-</ol>
-
-<pre><code>import hashlib
-
-def content_hash(data: bytes) -&gt; str:
-    return hashlib.sha256(data).hexdigest()          <span class="cmt"># a stable fingerprint of the bytes</span>
-
-def update_document(source_id, raw_bytes, manifest, store):
-    new_hash = content_hash(raw_bytes)
-    old = manifest.get(source_id)                    <span class="cmt"># the last version we indexed, if any</span>
-
-    <span class="cmt"># 1) unchanged (or a duplicate of what we already have) → do nothing</span>
-    if old and old["hash"] == new_hash:
-        return "skip"
-
-    <span class="cmt"># 2) delete OLD chunks FIRST, so the index never holds two versions at once</span>
-    store.delete(filter={"source_id": source_id})
-
-    <span class="cmt"># 3-4) re-parse → clean → chunk → embed the NEW version</span>
-    chunks  = chunk(clean(parse(raw_bytes)))
-    vectors = embed([c.text for c in chunks])
-
-    <span class="cmt"># 5) upsert new chunks, each tagged for the NEXT update and for citations</span>
-    store.upsert([
-        {"id": f"{source_id}:{i}", "values": v,
-         "metadata": {"source_id": source_id, "version": new_hash[:12], "text": c.text}}
-        for i, (c, v) in enumerate(zip(chunks, vectors))
-    ])
-
-    <span class="cmt"># 6) record the new state (audit trail + next-run hash compare)</span>
-    manifest.put(source_id, {"hash": new_hash, "parser": PARSER_VERSION, "ts": now()})
-    return f"reindexed {len(chunks)} chunks"
-</code></pre>
-<div class="out"><div class="lbl">▶ Output</div>reindexed 42 chunks</div>
-
-<div class="tipbox">
-  <div class="lbl">✅ Tip</div>
-  <p>For a <strong>deleted</strong> source document, run only step 2 (delete by <code>source_id</code>) and drop its manifest row — there's nothing to re-insert. And make the whole function safe to retry: if a crash lands between delete and upsert, the next run simply re-does both, because the manifest only advances once step 6 succeeds.</p>
-</div>
-
-<h4>Updating the whole PDF vs. just the part that changed</h4>
-<p>The six steps above replace the <em>entire</em> document — delete all its chunks, re-ingest from scratch. That <strong>whole-document replace</strong> is the simplest and safest default, and the right choice almost all the time (a document hash changed, so re-do it). But when a document is <em>very large and edited often but only a little</em> — a 500-page product manual where one page is corrected overnight — re-embedding all 1,200 chunks to change three is wasteful. Then you switch to a <strong>chunk-level (partial) update</strong>:</p>
-<ol>
-  <li><strong>Re-chunk</strong> the new version and compute a hash <em>per chunk</em> (not just one hash for the whole file).</li>
-  <li><strong>Diff</strong> against the stored chunk hashes for that <code>source_id</code>: <strong>delete</strong> the chunks whose hash disappeared, <strong>embed + upsert</strong> only the chunks whose hash is new, and <strong>leave untouched</strong> every chunk whose hash is unchanged — so you pay to embed three chunks, not twelve hundred.</li>
-</ol>
-
-<pre><code><span class="cmt"># The trick: make each chunk's id BE its content hash, so diffing is just set math.</span>
-def chunk_id(source_id, text):
-    return f"{source_id}:{content_hash(text.encode())[:12]}"   <span class="cmt"># same text → same id</span>
-
-def update_document_partial(source_id, raw_bytes, store):
-    new_chunks = chunk(clean(parse(raw_bytes)))                <span class="cmt"># re-chunk the NEW version</span>
-    new_by_id  = {chunk_id(source_id, c.text): c for c in new_chunks}
-
-    old_ids = set(store.list_ids(filter={"source_id": source_id}))  <span class="cmt"># what's already indexed</span>
-    new_ids = set(new_by_id)
-
-    to_add    = new_ids - old_ids      <span class="cmt"># new or edited chunks → embed these</span>
-    to_delete = old_ids - new_ids      <span class="cmt"># removed or edited-away chunks → drop these</span>
-    unchanged = old_ids &amp; new_ids      <span class="cmt"># identical hash → leave as-is, no embed, no write</span>
-
-    if to_delete:
-        store.delete(ids=list(to_delete))                     <span class="cmt"># remove only the stale ids</span>
-    if to_add:
-        texts   = [new_by_id[i].text for i in to_add]
-        vectors = embed(texts)                                <span class="cmt"># embed ONLY the changed chunks</span>
-        store.upsert([
-            {"id": i, "values": v, "metadata": {"source_id": source_id, "text": t}}
-            for i, v, t in zip(to_add, vectors, texts)
-        ])
-    return f"+{len(to_add)} -{len(to_delete)} (unchanged {len(unchanged)})"
-</code></pre>
-<div class="out"><div class="lbl">▶ Output</div>+3 -3 (unchanged 1197)</div>
-
-<div class="warn">
-  <div class="lbl">⚠ Watch out</div>
-  <p>The catch with partial updates is <strong>chunk boundaries shift</strong>. Insert one sentence on page 2 and every chunk after it can re-flow, so a genuine one-line edit looks like "everything changed" to a naive hash-diff — and you've saved nothing. Two defences: use <strong>structure-aware chunking</strong> (split on stable headings/sections so an edit stays inside its own section), and <strong>fall back to whole-document replace</strong> when the diff touches most of the doc. Rule of thumb: <em>whole-document replace by default; chunk-level only for big documents with localised edits and stable section boundaries.</em></p>
-</div>
-
 <div class="card">
   <div class="lbl">⚙️ In production</div>
   <p><strong>Cost &amp; latency.</strong> The expensive stations are Parse (especially vision parsers at roughly $0.01–0.05 per page) and Embed (an API call per chunk). A one-million-page collection is a real budget line, so you ingest once and re-ingest only deltas. End-to-end, a single document takes seconds; a full collection backfill runs for hours and is scheduled off-peak.</p>
-  <p><strong>Scale &amp; failure modes.</strong> At hundreds of thousands of files, make every station <em>idempotent</em> and resumable — keyed by source id and content hash — so a crash at file 300,000 restarts from there, not from zero. The classic silent failures are a parser returning empty text, an embedding call timing out and being skipped, and a changed document whose old chunks were never deleted. Build a dead-letter queue for files that fail, and never let one poison file halt the batch.</p>
-  <p><strong>Monitoring.</strong> Track per run: files seen, files changed, chunks written, chunks deleted, parse-empty rate, and p95 stage latency. A sudden spike in "parse-empty" or a drop in "chunks written" is your early warning that a source changed format or a parser broke.</p>
+  <p><strong>Scale &amp; failure modes.</strong> At hundreds of thousands of files, make every station <em>idempotent</em> and resumable — keyed by source id and content hash — so a crash at file 300,000 restarts from there, not from zero. The classic silent failures are a parser returning empty text, an embedding call timing out and being skipped, and a changed document whose old chunks were never deleted. Build a <strong>dead-letter queue</strong> (a side list where files that fail wait for a human or a later retry, instead of blocking everyone behind them — one corrupt <code>loan_deed.pdf</code> parks there while the other 299,999 finish) for files that fail, and never let one poison file halt the batch.</p>
+  <p><strong>Monitoring.</strong> Track per run: files seen, files changed, chunks written, chunks deleted, parse-empty rate, and p95 stage latency (the time 95% of pages beat — your near-worst case, e.g. "95% of pages parse in under 0.8s," not the flattering average). A sudden spike in "parse-empty" or a drop in "chunks written" is your early warning that a source changed format or a parser broke.</p>
   <p><strong>Security &amp; compliance (a bank).</strong> The manifest is your audit trail — regulators ask "what did the assistant know, from which document version, on which date?" Keep lineage (source → version → chunk ids) and timestamps. Pin a parser version per document so an answer is always reproducible, and keep the whole pipeline inside the bank's trust boundary (VPC, encryption at rest, access logs) because raw documents contain PII.</p>
 </div>
 
@@ -4630,8 +4537,155 @@ print(f"{len(to_ingest)} changed files to ingest")  <span class="cmt"># visibili
 
 <p>Notice the two quiet heroes: <code>LastModified &gt; last_run</code> (incremental sync — we did 7 files, not 400,000) and <code>acl</code> (the audience tag rides along into metadata so the retriever can enforce it later).</p>
 
-<h4>Going deeper — deletes, moves and the permissions that change behind your back</h4>
-<p>Incremental sync has a famous blind spot: it sees <em>new</em> and <em>changed</em> files easily, but a <strong>deleted</strong> file simply stops appearing — and if you only ever add, your index keeps answering from a policy that was retracted months ago. A correct connector reconciles: it compares the full set of source ids it sees this run against the manifest and <em>tombstones</em> anything that vanished, so the chunks get removed from the index too. The same applies to <strong>moves and renames</strong> (treat as delete-plus-add) and, most dangerously, to <strong>permission changes</strong>: a document whose audience narrows from "all-staff" to "compliance-only" must have its stored ACL re-synced, or last week's broad label keeps leaking it. Re-pull ACLs on every sync, not just on first ingest.</p>
+<h4>One interface, many sources — and the SaaS connector the S3 sketch skips</h4>
+<p>The S3 example above gets off easy: AWS handles auth through a role, and S3 never rate-limits a nightly crawl. A SaaS source like Confluence is harder. You log in with an OAuth token, the server throttles you with <code>429</code> responses, and you page through results. So every connector implements the <em>same shape</em> and the pipeline treats them all the same way:</p>
+
+<pre><code>import time, requests                             <span class="cmt"># requests: the common HTTP client for SaaS APIs</span>
+
+class Connector:                                  <span class="cmt"># the shape EVERY source must fit</span>
+    def fetch_changed(self, since):               <span class="cmt"># yield one record per new/changed item</span>
+        raise NotImplementedError                 <span class="cmt"># each source fills this in its own way</span>
+
+class ConfluenceConnector(Connector):             <span class="cmt"># one SaaS source, one adapter</span>
+    def __init__(self, base, token):
+        self.base, self.token = base, token       <span class="cmt"># base URL + OAuth token (pulled from a secrets manager)</span>
+
+    def _get(self, path, **params):               <span class="cmt"># one polite GET that handles throttling</span>
+        for attempt in range(5):                  <span class="cmt"># retry a few times, then give up loudly</span>
+            r = requests.get(self.base + path,
+                headers={"Authorization": f"Bearer {self.token}"},
+                params=params)
+            if r.status_code != 429:              <span class="cmt"># 429 = "you're going too fast"</span>
+                r.raise_for_status()              <span class="cmt"># other HTTP errors become exceptions</span>
+                return r.json()
+            wait = int(r.headers.get("Retry-After", 2 ** attempt))  <span class="cmt"># obey the server, else back off: 1,2,4,8s</span>
+            time.sleep(wait)                      <span class="cmt"># wait, then try the same request again</span>
+        raise RuntimeError("Confluence throttled us past the retry budget")
+
+    def fetch_changed(self, since):               <span class="cmt"># incremental: only pages edited since last run</span>
+        cql = f'lastmodified &gt; "{since:%Y-%m-%d %H:%M}"'  <span class="cmt"># Confluence Query Language: the delta filter</span>
+        start = 0
+        while True:                               <span class="cmt"># walk the pages of results</span>
+            page = self._get("/rest/api/content/search", cql=cql,
+                expand="body.storage,restrictions.read", start=start, limit=50)
+            for item in page["results"]:
+                groups = item["restrictions"]["read"]["restrictions"]["group"]["results"]
+                acl = [g["name"] for g in groups] or ["all-staff"]  <span class="cmt"># who may see it → rides into metadata</span>
+                yield {
+                    "source_id": f"confluence:{item['id']}",        <span class="cmt"># stable id for updates and deletes</span>
+                    "bytes": item["body"]["storage"]["value"].encode(),
+                    "acl": acl,                   <span class="cmt"># CARRIED FORWARD, exactly like the S3 tag</span>
+                }
+            if start + 50 &gt;= page["size"]:        <span class="cmt"># reached the last page of results</span>
+                break
+            start += 50
+
+last_run = datetime(2026, 11, 1, tzinfo=timezone.utc)
+changed = list(ConfluenceConnector("https://bank.atlassian.net/wiki",
+                                   token).fetch_changed(last_run))
+print(f"{len(changed)} changed wiki pages to ingest")
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>18 changed wiki pages to ingest</code></p></div>
+
+<p>Same record shape as the S3 connector (<code>source_id</code>, <code>bytes</code>, <code>acl</code>), so the ingestion stage after this never knows or cares which system a document came from. The two things S3 didn't need show up here in plain sight: the <code>Retry-After</code> backoff loop (politeness) and the OAuth <code>Bearer</code> token (auth). Swap in a <code>SharePointConnector</code> or a <code>DatabaseConnector</code> and the pipeline downstream does not change a line.</p>
+
+<h4>The manifest — how a connector remembers what it already ingested</h4>
+<p>"Incremental sync" and "<code>last_run</code>" only work if the connector <em>remembers</em> what it saw last time. That memory is the <strong>manifest</strong>: a small saved table with <strong>one row per source document</strong>. It is not the documents and not the vectors; it is a lightweight bookkeeping record, kept in a database table (or a JSON file for a small source), holding just enough to answer "have I seen this before, and has it changed?"</p>
+
+<p>A manifest row holds four things: the <strong>source id</strong> (stable name of the document), a <strong>content hash</strong> (fingerprint of the bytes, so a one-word edit changes it), the <strong>time last seen</strong>, and the <strong>ACL</strong> (so you can notice when permissions change). Here is a manifest with three rows:</p>
+
+<pre><code>{
+  "s3:policies/home_loan_terms.pdf":  {"hash": "a1b2c3d4e5f6", "seen": "2026-11-01", "acl": "mortgages-team"},
+  "s3:policies/savings_rates.pdf":    {"hash": "839e78cb81fd", "seen": "2026-11-01", "acl": "all-staff"},
+  "s3:policies/old_fee_schedule.pdf": {"hash": "99aa88bb77cc", "seen": "2026-11-01", "acl": "all-staff"}
+}
+</code></pre>
+
+<p>The <strong>last-run watermark</strong> is just the newest <code>seen</code> time in this file (here, 2026-11-01). Next run, you ask the source "what changed since then?" — that is the cheap query that turns a 400,000-document crawl into a few deltas. <em>Why 400,000?</em> It is simply the whole collection: a full crawl re-lists every one of them; incremental sync, backed by the manifest, touches only the handful that moved.</p>
+
+<h4>Finding created, changed and deleted files — the three cases, in code</h4>
+<p>Each run you build a fresh snapshot of what the source shows you <em>now</em>, then compare it to the manifest using plain set math. Three cases fall out:</p>
+<ul>
+  <li><strong>Created</strong> — a source id in the new snapshot that the manifest has never seen. Ingest it.</li>
+  <li><strong>Modified</strong> — a source id in <em>both</em>, but the content hash differs. Re-ingest it (and re-check its ACL).</li>
+  <li><strong>Deleted</strong> — a source id in the manifest that has <em>vanished</em> from the source. Tombstone it: remove its chunks from the index, or a retracted policy answers forever.</li>
+</ul>
+
+<pre><code>import json, hashlib                                <span class="cmt"># json for the manifest file, hashlib for fingerprints</span>
+
+def load_manifest(path):                           <span class="cmt"># the connector's memory of the last run</span>
+    try:
+        return json.load(open(path))               <span class="cmt"># {source_id: {hash, seen, acl}}</span>
+    except FileNotFoundError:
+        return {}                                  <span class="cmt"># first run ever: we've seen nothing yet</span>
+
+def content_hash(raw_bytes):                       <span class="cmt"># same fingerprint idea used for dedup</span>
+    return hashlib.sha256(raw_bytes).hexdigest()[:12]
+
+def reconcile(snapshot, manifest):                 <span class="cmt"># snapshot = {source_id: raw_bytes} seen NOW</span>
+    now = {sid: content_hash(b) for sid, b in snapshot.items()}  <span class="cmt"># fingerprint everything we see this run</span>
+    old = {sid: row["hash"] for sid, row in manifest.items()}    <span class="cmt"># fingerprints from last run</span>
+
+    created  = now.keys() - old.keys()             <span class="cmt"># in source now, never in the manifest</span>
+    deleted  = old.keys() - now.keys()             <span class="cmt"># in the manifest, gone from the source</span>
+    modified = {sid for sid in now.keys() &amp; old.keys()  <span class="cmt"># in BOTH runs...</span>
+                if now[sid] != old[sid]}           <span class="cmt"># ...but the content fingerprint changed</span>
+    return created, modified, deleted, now
+
+<span class="cmt"># --- one nightly run -------------------------------------------------</span>
+manifest = load_manifest("policies.manifest.json")
+snapshot = {                                       <span class="cmt"># what the source shows us THIS run (bytes per doc)</span>
+    "s3:policies/home_loan_terms.pdf":  b"...edited early-closure fee is now 1.5%...",  <span class="cmt"># content changed</span>
+    "s3:policies/savings_rates.pdf":    b"...unchanged savings rates...",               <span class="cmt"># same as before</span>
+    "s3:policies/fx_transfer_fees.pdf": b"...brand new fee schedule...",                <span class="cmt"># brand new file</span>
+}                                                  <span class="cmt"># note: old_fee_schedule.pdf is absent → deleted</span>
+
+created, modified, deleted, now = reconcile(snapshot, manifest)
+print(f"created: {len(created)}  modified: {len(modified)}  deleted: {len(deleted)}")
+for sid in created:  print(f"  + {sid} (ingest)")
+for sid in modified: print(f"  ~ {sid} (re-ingest + re-check ACL)")
+for sid in deleted:  print(f"  - {sid} (tombstone: delete its chunks)")
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>created: 1  modified: 1  deleted: 1<br>  + s3:policies/fx_transfer_fees.pdf (ingest)<br>  ~ s3:policies/home_loan_terms.pdf (re-ingest + re-check ACL)<br>  - s3:policies/old_fee_schedule.pdf (tombstone: delete its chunks)</code></p></div>
+
+<p>After you act on the three lists, you <strong>save the new manifest</strong> so the next run has an up-to-date memory — drop the tombstoned ids, and write today's hash, time and ACL for everything still present:</p>
+
+<pre><code>fresh = {sid: {"hash": now[sid], "seen": "2026-11-11",      <span class="cmt"># rebuild the manifest from this run</span>
+              "acl": snapshot_acls[sid]}                    <span class="cmt"># re-pull ACL every run, never trust the old one</span>
+         for sid in now}                                    <span class="cmt"># deleted ids simply aren't here → forgotten</span>
+json.dump(fresh, open("policies.manifest.json", "w"))       <span class="cmt"># persisted for next time</span>
+</code></pre>
+
+<h4>Moves, renames and permission changes — the two cases hash-diff alone gets wrong</h4>
+<p>Content-hash reconcile handles create, update and delete. Two more real-world changes need naming, because a naive loop mishandles them.</p>
+
+<p><strong>1. Moves and renames need no extra code</strong> — they fall out of the same set math. A renamed file arrives under a new <code>source_id</code>, and its old <code>source_id</code> stops appearing. So reconcile reports one delete plus one create, which is exactly right: the old chunks go, the new ones land. Watch it happen — rename <code>fx_transfer_fees.pdf</code> to <code>fx_fees_2026.pdf</code> and run again:</p>
+<pre><code>snapshot = {                                       <span class="cmt"># same bytes, new name</span>
+    "s3:policies/fx_fees_2026.pdf": b"...brand new fee schedule...",  <span class="cmt"># renamed file</span>
+    <span class="cmt"># ...the other unchanged files...</span>
+}
+created, modified, deleted, _ = reconcile(snapshot, manifest)
+<span class="cmt"># + s3:policies/fx_fees_2026.pdf   (create: the new name)</span>
+<span class="cmt"># - s3:policies/fx_transfer_fees.pdf (delete: the old name's chunks go)</span>
+</code></pre>
+
+<p><strong>2. Permission changes are the dangerous case</strong>, because the content hash does <em>not</em> change when only the audience does. A memo re-shared from "all-staff" to "compliance-only" has identical bytes, so hash-only reconcile marks it <strong>unchanged</strong> and the index keeps answering under last week's broad label. The teller keeps seeing it. The fix is a proper step: diff the <em>ACL</em> too, and when only the ACL moved, re-stamp the chunks' metadata — a cheap metadata update, with no re-parse and no re-embed:</p>
+<pre><code>def acl_changed(snapshot_acls, manifest):            <span class="cmt"># snapshot_acls = {source_id: current_acl}</span>
+    reacl = {}
+    for sid, new_acl in snapshot_acls.items():
+        old = manifest.get(sid)                      <span class="cmt"># what audience we stored last run</span>
+        if old and old["acl"] != new_acl:            <span class="cmt"># same file, audience moved</span>
+            reacl[sid] = new_acl
+    return reacl                                     <span class="cmt"># {source_id: new_acl} to re-stamp</span>
+
+for sid, new_acl in acl_changed(snapshot_acls, manifest).items():
+    store.update_metadata(filter={"source_id": sid},  <span class="cmt"># no re-embed: just overwrite the label</span>
+                          set={"acl": new_acl})
+    print(f"  @ {sid} acl → {new_acl}")
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>  @ s3:policies/kyc_memo.pdf acl → compliance-only</code></p></div>
+
+<p>So a full nightly reconcile acts on <strong>four</strong> buckets, not three: <strong>create</strong>, <strong>update</strong> (content changed), <strong>delete</strong>, and <strong>re-ACL</strong> (permission changed, content didn't). Re-pull ACLs on every sync and overwrite the stored label; never trust last week's.</p>
 
 <div class="card">
   <div class="lbl">⚙️ In production</div>
@@ -4659,6 +4713,146 @@ print(f"{len(to_ingest)} changed files to ingest")  <span class="cmt"># visibili
 <div class="qa">
   <div class="q">Q. "Your new assistant is showing a teller a compliance-only memo. What went wrong, and where?"</div>
   <div class="a">A. The connector dropped the document's ACL at ingest. Access control only works if the <em>who-can-see-this</em> label travels with the chunk from the first step — you cannot bolt it on in the prompt later. The second half they're listening for: re-pull ACLs on <em>every</em> sync (a document whose audience narrows must be re-stamped), and reconcile deletes by tombstoning source ids that stop appearing, or a retracted policy keeps answering forever.</div>
+</div>
+</section>
+
+
+<section class="topic">
+<h3>Keeping the index fresh — updating, deleting &amp; re-ingesting</h3>
+<p class="lede">Documents are not frozen: they get re-published, renamed and retracted. Ingestion is a loop, not a one-time load, and it keeps the index matching the source as both change.</p>
+<p>The connector in the previous section <em>detects</em> what changed. This section is the other half: the exact steps to <em>apply</em> each change to the index, whether you update a document, delete one, or patch just the part that moved, without ever leaving a stale answer retrievable.</p>
+
+<h4>Batch vs. streaming — and the re-ingestion problem both must solve</h4>
+<p>Two shapes of pipeline exist, and banks use both. A <strong>batch</strong> pipeline wakes on a schedule (say, nightly) and re-checks every source — simple, cheap, and perfect for policy PDFs that change monthly. A <strong>streaming</strong> pipeline reacts to events (a "document uploaded" webhook from SharePoint, a new row in a change feed) and ingests within seconds — needed when freshness matters, like a rates sheet that must be searchable the minute it's published. The hard part neither shape escapes is <strong>re-ingestion</strong>: when a document changes, its old chunks must be <em>deleted</em> from the index before the new ones land, or the assistant will retrieve both the 2025 and 2026 fee tables and quote whichever it likes. The manifest's content hash is what makes this manageable — same hash, skip; new hash, delete-then-reindex by source id.</p>
+
+<h4>How to update a document in a RAG index — the exact steps</h4>
+<p>When a policy PDF is re-published, you don't "edit" the index — you replace that document's slice of it. The whole procedure is six steps, and the order matters: <strong>delete before you insert</strong>, or the index briefly holds two versions and retrieval mixes them.</p>
+<ol>
+  <li><strong>Hash &amp; compare.</strong> Compute the new content hash (e.g. SHA-256 of the bytes) and look it up in the manifest by <code>source_id</code>. Same hash ⇒ nothing changed, <em>skip</em> — this is what makes re-runs <strong>idempotent</strong> (run it ten times, get the same result as once: an unchanged <code>home_loan_terms.pdf</code> is skipped on every nightly pass) and cheap. (The same exact hash is also how you catch <strong>duplicates</strong>: two files with one hash are one document.)</li>
+  <li><strong>Delete the old chunks</strong> for that <code>source_id</code> from the vector store (a metadata-filter delete), so no stale version can be retrieved.</li>
+  <li><strong>Re-parse → clean → chunk</strong> the new version (the same first three stations as a first-time ingest).</li>
+  <li><strong>Embed</strong> the new chunks.</li>
+  <li><strong>Upsert</strong> (insert-or-update in one call: write the chunk if its id is new, overwrite in place if that id already exists — so re-running the step never leaves two copies of chunk <code>home_loan_terms.pdf:7</code>) the new chunks, each tagged with <code>source_id</code>, a version stamp, and its text — the identity you'll need for the <em>next</em> update and for citations.</li>
+  <li><strong>Record &amp; verify.</strong> Write the new hash, parser version and timestamp to the manifest (your audit trail), then confirm only the new version is retrievable and emit the counts (chunks deleted / written).</li>
+</ol>
+
+<pre><code>import hashlib
+
+def content_hash(data: bytes) -&gt; str:
+    return hashlib.sha256(data).hexdigest()          <span class="cmt"># a stable fingerprint of the bytes</span>
+
+def update_document(source_id, raw_bytes, manifest, store):
+    new_hash = content_hash(raw_bytes)
+    old = manifest.get(source_id)                    <span class="cmt"># the last version we indexed, if any</span>
+
+    <span class="cmt"># 1) unchanged (or a duplicate of what we already have) → do nothing</span>
+    if old and old["hash"] == new_hash:
+        return "skip"
+
+    <span class="cmt"># 2) delete OLD chunks FIRST, so the index never holds two versions at once</span>
+    store.delete(filter={"source_id": source_id})
+
+    <span class="cmt"># 3-4) re-parse → clean → chunk → embed the NEW version</span>
+    chunks  = chunk(clean(parse(raw_bytes)))
+    vectors = embed([c.text for c in chunks])
+
+    <span class="cmt"># 5) upsert new chunks, each tagged for the NEXT update and for citations</span>
+    store.upsert([
+        {"id": f"{source_id}:{i}", "values": v,
+         "metadata": {"source_id": source_id, "version": new_hash[:12], "text": c.text}}
+        for i, (c, v) in enumerate(zip(chunks, vectors))
+    ])
+
+    <span class="cmt"># 6) record the new state (audit trail + next-run hash compare)</span>
+    manifest.put(source_id, {"hash": new_hash, "parser": PARSER_VERSION, "ts": now()})
+    return f"reindexed {len(chunks)} chunks"
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div>reindexed 42 chunks</div>
+
+<h4>Deleting a document — the steps</h4>
+<p>A retracted policy must leave the index completely, or BankAssist keeps quoting a rule the bank has withdrawn. Deletion is the shortest lifecycle operation — three steps, no parsing or embedding at all:</p>
+<ol>
+  <li><strong>Target its chunks</strong> by <code>source_id</code> — the same label every chunk was stamped with at ingest.</li>
+  <li><strong>Delete them</strong> with one metadata-filter delete. This is step 2 of the update procedure run on its own: there is nothing to re-insert afterwards.</li>
+  <li><strong>Drop the manifest row</strong> for that <code>source_id</code>, so the next run doesn't go looking for a file that is gone, and your audit trail records the removal.</li>
+</ol>
+
+<pre><code>def delete_document(source_id, manifest, store):
+    removed = store.delete(filter={"source_id": source_id})  <span class="cmt"># drop every chunk of this one doc</span>
+    manifest.remove(source_id)                               <span class="cmt"># forget it: next run won't expect it back</span>
+    return f"deleted {removed} chunks for {source_id}"
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div>deleted 42 chunks for policies/old_fee_schedule.pdf</div>
+
+<div class="tipbox">
+  <div class="lbl">✅ Create, update, delete are one pattern</div>
+  <p>These are not three separate pipelines — they are the same stations entered at different points. <strong>Create</strong> (a new file) runs all six stations. <strong>Update</strong> (a changed file) runs delete-then-reindex. <strong>Delete</strong> (a removed file) runs the delete alone. You rarely call them by hand one at a time: the <code>reconcile()</code> step shown later sorts a whole source into these three buckets each run and applies the right one to each document. Make every operation safe to retry — if a crash lands between the delete and the upsert, the next run simply re-does both, because the manifest only advances after the final record step.</p>
+</div>
+
+<h4>Updating the whole PDF vs. just the part that changed</h4>
+<p>The six steps above replace the <em>entire</em> document — delete all its chunks, re-ingest from scratch. That <strong>whole-document replace</strong> is the simplest and safest default, and the right choice almost all the time (a document hash changed, so re-do it). But when a document is <em>very large and edited often but only a little</em> — a 500-page product manual where one page is corrected overnight — re-embedding all 1,200 chunks to change three is wasteful. Then you switch to a <strong>chunk-level (partial) update</strong>:</p>
+<ol>
+  <li><strong>Re-chunk</strong> the new version and compute a hash <em>per chunk</em> (not just one hash for the whole file).</li>
+  <li><strong>Diff</strong> against the stored chunk hashes for that <code>source_id</code>: <strong>delete</strong> the chunks whose hash disappeared, <strong>embed + upsert</strong> only the chunks whose hash is new, and <strong>leave untouched</strong> every chunk whose hash is unchanged — so you pay to embed three chunks, not twelve hundred.</li>
+</ol>
+
+<pre><code><span class="cmt"># The trick: make each chunk's id BE its content hash, so diffing is just set math.</span>
+def chunk_id(source_id, text):
+    return f"{source_id}:{content_hash(text.encode())[:12]}"   <span class="cmt"># same text → same id</span>
+
+def update_document_partial(source_id, raw_bytes, store):
+    new_chunks = chunk(clean(parse(raw_bytes)))                <span class="cmt"># re-chunk the NEW version</span>
+    new_by_id  = {chunk_id(source_id, c.text): c for c in new_chunks}
+
+    old_ids = set(store.list_ids(filter={"source_id": source_id}))  <span class="cmt"># what's already indexed</span>
+    new_ids = set(new_by_id)
+
+    to_add    = new_ids - old_ids      <span class="cmt"># new or edited chunks → embed these</span>
+    to_delete = old_ids - new_ids      <span class="cmt"># removed or edited-away chunks → drop these</span>
+    unchanged = old_ids &amp; new_ids      <span class="cmt"># identical hash → leave as-is, no embed, no write</span>
+
+    if to_delete:
+        store.delete(ids=list(to_delete))                     <span class="cmt"># remove only the stale ids</span>
+    if to_add:
+        texts   = [new_by_id[i].text for i in to_add]
+        vectors = embed(texts)                                <span class="cmt"># embed ONLY the changed chunks</span>
+        store.upsert([
+            {"id": i, "values": v, "metadata": {"source_id": source_id, "text": t}}
+            for i, v, t in zip(to_add, vectors, texts)
+        ])
+    return f"+{len(to_add)} -{len(to_delete)} (unchanged {len(unchanged)})"
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div>+3 -3 (unchanged 1197)</div>
+
+<div class="warn">
+  <div class="lbl">⚠ Watch out — the shifted-boundary trap</div>
+  <p>Partial update has one failure mode that quietly cancels its benefit: <strong>chunk boundaries shift</strong>. Insert one sentence near the top and every chunk below it re-flows, so a one-line edit looks like "the whole document changed" to a per-chunk hash-diff — and you re-embed everything anyway.</p>
+</div>
+
+<h4>Why the boundaries shift — see it happen</h4>
+<p>Fixed-size chunking cuts text every N characters, counting from the start of the document. That counter is the problem: add text early and every later cut lands on <em>different</em> words, so every later chunk gets a new hash even though the words barely moved. Here is a 3-chunk document, cut every ~40 characters:</p>
+<pre><code><span class="cmt"># BEFORE (cut every ~40 chars from the top)</span>
+chunk 0: "Fees apply to early closure of a loan. "   <span class="cmt"># hash a1</span>
+chunk 1: "The fee is 1% of the outstanding balan"       <span class="cmt"># hash b2</span>
+chunk 2: "ce. Contact support for a waiver."            <span class="cmt"># hash c3</span>
+
+<span class="cmt"># AFTER: we insert "Updated Jan 2026. " at the very start</span>
+chunk 0: "Updated Jan 2026. Fees apply to early c"      <span class="cmt"># hash z9  (changed, fair enough)</span>
+chunk 1: "losure of a loan. The fee is 1% of the "      <span class="cmt"># hash y8  (DIFFERENT — but the words are the same!)</span>
+chunk 2: "outstanding balance. Contact support fo"      <span class="cmt"># hash x7  (DIFFERENT too)</span>
+<span class="cmt"># result: 3/3 chunks "changed". The hash-diff saved nothing.</span>
+</code></pre>
+<p>The 18 inserted characters pushed every boundary 18 places to the right. Not one chunk after the edit kept its old text, so all three re-embed. On a 1,200-chunk manual, a corrected footnote on page 2 re-embeds 1,195 chunks. That is the trap.</p>
+
+<h4>The solutions — in the order you should reach for them</h4>
+<ol>
+  <li><strong>Structure-aware chunking (the everyday fix).</strong> Cut on <em>stable anchors</em> the document already has — headings, numbered sections, Markdown <code>#</code> headers, paragraph breaks — instead of a character counter. Now an edit inside "§4.2 Early closure" changes only §4.2's chunk; §4.3 onward is byte-identical, same hashes, untouched. Give each chunk an id built from its <strong>heading path</strong>, not its offset: <code>home_loan_terms.pdf#4.2</code>, not <code>home_loan_terms.pdf:chars-1200-1700</code>. Most real documents have enough structure for this to work, and it is why we keep the section path through cleaning.</li>
+  <li><strong>Content-defined chunking (CDC) — the shift-proof option for documents with little structure.</strong> Borrowed from backup/dedup systems (rsync, restic). Instead of cutting every N characters, slide a small window through the text, hash it, and cut <em>wherever the rolling hash hits a chosen pattern</em> (say, low bits all zero). Because each boundary is decided by the <em>local</em> content around it, not by a distance from the top, inserting text early moves only the one boundary next to the insertion — every later boundary re-aligns itself on the same words as before. FastCDC and the Gear hash are the usual algorithms. One edit touches one or two chunks, no matter where it lands.</li>
+  <li><strong>Whole-document replace (the honest fallback).</strong> When the edit genuinely touches most of the document, or the doc is small, stop being clever: delete all its chunks and re-ingest. Re-embedding 40 chunks costs cents; the engineering to avoid it rarely pays back. Trigger it automatically — if the diff marks more than, say, 40% of chunks changed, replace the whole document instead.</li>
+</ol>
+<div class="tipbox">
+  <div class="lbl">✅ Rule of thumb</div>
+  <p><strong>Whole-document replace by default.</strong> Reach for chunk-level partial update only for <em>big</em> documents with <em>localised</em> edits — and pair it with structure-aware or content-defined chunking, or the shifted boundaries hand all the savings back.</p>
 </div>
 </section>
 
@@ -4709,6 +4903,11 @@ print(chunk["text"])                               <span class="cmt"># confirm t
 <div class="out"><div class="lbl">▶ Output</div><p><code>Early-closure fee is 1% of the outstanding balance.</code></p></div>
 
 <p>The footer and header vanished, "out-\nstanding" became "outstanding," and yet the chunk still knows it's from page 12 of the mortgage terms, under section 4.2, visible to the mortgages team. That bundle of text-plus-labels is what moves down the pipeline.</p>
+
+<div class="warn">
+  <div class="lbl">⚠ Don't read this as "write a regex per document"</div>
+  <p>The exact strings above (<code>"BankAssist — Internal"</code>, <code>"Page \d+ of \d+"</code>) are for teaching — they show <em>what</em> cleaning removes. You cannot hand-write patterns for a bank's thousands of layouts, most of which you will never open. At scale you <strong>detect</strong> boilerplate instead of naming it, and you reach for a library parser rather than raw regex for messy formats: <code>trafilatura</code> or readability for web pages (they find the main article and drop the nav/ads for you), and a layout-aware PDF parser (<code>unstructured</code>, Azure Document Intelligence) that tags headers/footers by their position on the page. The next section shows the detect-don't-name method.</p>
+</div>
 
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
@@ -4888,7 +5087,7 @@ print(parse_health(extracted_pages))               <span class="cmt"># run this 
 
 <p>Here's the thing almost nobody tells you: a PDF file doesn't actually store sentences. It stores instructions like "place the glyph '6' at x=220, y=118." The human eye assembles those positioned marks into words and tables. A parser has to <em>reconstruct</em> that — guess the reading order, group marks into words, and recognise when a cluster of numbers is really a table. It's less like reading and more like archaeology.</p>
 
-<p>And banking is unusually table-heavy: rate cards, amortization schedules, fee grids, financial statements, KYC checklists. So for a bank, <strong>table extraction is the main event</strong>, not a side quest.</p>
+<p>And banking is unusually table-heavy: rate cards, amortization schedules (the row-per-month timetable of how a loan is paid down), fee grids, financial statements, KYC checklists. So for a bank, <strong>table extraction is the main event</strong>, not a side quest.</p>
 
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
@@ -5164,7 +5363,7 @@ def parse_pdf(path):
 <div class="card">
   <div class="lbl">⚙️ In production</div>
   <p><strong>Cost &amp; latency.</strong> Tier 1 is milliseconds and ~free; the vision tier is seconds and cents per page. Your p95 latency and your monthly bill are both dominated by the escalation rate, so that single number is the one to watch and tune.</p>
-  <p><strong>Scale &amp; failure modes.</strong> A hosted vision parser is an external dependency: it has rate limits, outages and timeouts. Wrap it with retries, a circuit breaker, and a queue so a slow vendor stalls only the hard pages, not the whole collection. Keep a local fallback so ingestion never fully stops.</p>
+  <p><strong>Scale &amp; failure modes.</strong> A hosted vision parser is an external dependency: it has rate limits, outages and timeouts. Wrap it with retries, a <strong>circuit breaker</strong> (after, say, 20 failures in a row it stops calling the vendor for a cooling-off window, so a dead parser service isn't hammered and your queue doesn't pile up behind it), and a queue so a slow vendor stalls only the hard pages, not the whole collection. Keep a local fallback so ingestion never fully stops.</p>
   <p><strong>Monitoring.</strong> Track escalation rate, per-tier latency and error rate, per-tier cost, and gold-set accuracy by tier. An escalation rate creeping from 8% to 30% is both a cost alarm and a signal that a source changed format.</p>
   <p><strong>Security &amp; compliance (a bank).</strong> Hosted parsers mean documents leave your walls — confirm data-residency, encryption and no-training terms before sending PII-laden pages, or keep sensitive classes on an on-prem parser (Docling, PyMuPDF, Tesseract). Record the parser name <em>and version</em> per document so every answer is reproducible and auditable.</p>
 </div>
@@ -5696,7 +5895,7 @@ with engine.connect() as conn:                     <span class="cmt"># context m
 <div class="card">
   <div class="lbl">⚙️ In production</div>
   <p><strong>Cost &amp; latency.</strong> Path A is a one-time embed then cheap retrieval. Path B adds a live round-trip at <em>question time</em> — database or API latency lands directly in the user's wait, so cache briefly where safe, set tight timeouts, and have a graceful fallback message when the system-of-record is slow.</p>
-  <p><strong>Scale &amp; failure modes.</strong> Live queries can overload the core banking DB under traffic — always hit a read replica, never production OLTP, and rate-limit. The headline failure mode is still <em>stale embeddings</em> of volatile data (a balance quoted months late). Guard Path A with scheduled re-ingestion and delete-then-reindex; guard Path B with timeouts, circuit breakers and a read replica.</p>
+  <p><strong>Scale &amp; failure modes.</strong> Live queries can overload the core banking DB under traffic — always hit a <strong>read replica</strong> (a synced, read-only copy of the database kept for queries like these), never the production <strong>OLTP</strong> database (the live system processing customers' real transactions), and rate-limit. The headline failure mode is still <em>stale embeddings</em> of volatile data (a balance quoted months late). Guard Path A with scheduled re-ingestion and delete-then-reindex; guard Path B with timeouts, circuit breakers and a read replica.</p>
   <p><strong>Monitoring.</strong> Track live-query p95 latency and error/timeout rate, replica lag, cache hit rate, and — for Path A — the age of the newest ingested row per table (an alarm when a "slow" source hasn't refreshed in too long).</p>
   <p><strong>Security &amp; compliance (a bank).</strong> This is the highest-risk source: enforce row-level security at the database tied to the authenticated customer, use a read-only least-privilege account, never let the model emit free-form SQL, log every live query for audit, and keep all of it inside the trust boundary. Filtering results in the prompt is not access control.</p>
 </div>
@@ -5723,7 +5922,6 @@ with engine.connect() as conn:                     <span class="cmt"># context m
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
-
 <h2 class="part">Knowledge Layer (RAG) — Chunking</h2>
 <p class="part-intro">Before a bank's documents can answer questions, they have to be cut into pieces of the right size. This chapter is the whole story of that cut — why we make it, how to size it, and the clever ways to make it smarter.</p>
 
@@ -6011,18 +6209,19 @@ for label, splitter in [("CHARACTER", char), ("RECURSIVE", rec)]:  <span class="
 <div class="out">
   <div class="lbl">▶ Output</div>
 <pre><code>--- CHARACTER ---
-[0] (99 chars) 'Overdraft Policy.\n\nIf your balance goes below zero, a $35 fee applies. The fee is charged per transaction. No more than five fees are charged per day.'
-[1] (37 chars) 'Fees are waived for Premier accounts.'
+[0] (17 chars) 'Overdraft Policy.'
+[1] (131 chars) 'If your balance goes below zero, a $35 fee applies. The fee is charged per transaction. No more than five fees are charged per day.'
+[2] (37 chars) 'Fees are waived for Premier accounts.'
 
 --- RECURSIVE ---
-[0] (16 chars) 'Overdraft Policy.'
+[0] (17 chars) 'Overdraft Policy.'
 [1] (51 chars) 'If your balance goes below zero, a $35 fee applies.'
-[2] (72 chars) 'The fee is charged per transaction. No more than five fees are charged per day.'
+[2] (79 chars) 'The fee is charged per transaction. No more than five fees are charged per day.'
 [3] (37 chars) 'Fees are waived for Premier accounts.'
 </code></pre>
 </div>
 
-<p>Look at chunk <code>[0]</code> from <strong>CharacterTextSplitter</strong>: it's 99 characters even though we asked for 80. Why? Because its only separator is the blank line, and the whole first paragraph was one unbroken block — so it couldn't cut it further and let it run over. The blunt splitter either finds its one separator or gives up.</p>
+<p>Look at chunk <code>[1]</code> from <strong>CharacterTextSplitter</strong>: it's 131 characters even though we asked for 80. Why? It did cut cleanly at the two blank lines — that's how the heading and the Premier line came off as their own chunks — but the middle body paragraph has no blank line inside it. With only <code>"\n\n"</code> to work with, the splitter had no finer boundary to use, so it let that one chunk run right over the limit. The blunt splitter either finds its one separator or gives up.</p>
 
 <p>The <strong>RecursiveCharacterTextSplitter</strong> handled the same text gracefully: it split the heading off cleanly, kept each sentence tidy, and never produced a monster chunk. It cut at <code>". "</code> (sentence boundaries) once the paragraph was too big. That is the recursion doing its job — dropping to the next separator in the list only when needed.</p>
 
@@ -6162,7 +6361,7 @@ source = (
 
 splitter = RecursiveCharacterTextSplitter.from_language(  <span class="cmt"># build a splitter pre-loaded with Python's boundaries</span>
     language=Language.PYTHON,                  <span class="cmt"># tells it to prefer cutting at 'def', 'class', etc.</span>
-    chunk_size=60,                            <span class="cmt"># small size so each function lands in its own chunk</span>
+    chunk_size=100,                           <span class="cmt"># small size so each function lands in its own chunk</span>
     chunk_overlap=0,                          <span class="cmt"># code rarely needs overlap; functions are self-contained</span>
 )
 
@@ -6404,7 +6603,7 @@ rule = (
 )
 
 no_overlap = RecursiveCharacterTextSplitter(  <span class="cmt"># a splitter with NO overlap — the mistake we are demonstrating</span>
-    chunk_size=55,                            <span class="cmt"># small enough to force a cut inside the sentence</span>
+    chunk_size=48,                            <span class="cmt"># small enough to force a cut inside the sentence</span>
     chunk_overlap=0,                          <span class="cmt"># the bug: nothing is shared across the seam</span>
     separators=[" ", ""],                     <span class="cmt"># cut at spaces (and characters) so the break lands mid-sentence</span>
 )
@@ -6424,7 +6623,7 @@ for i, c in enumerate(no_overlap.split_text(rule)):  <span class="cmt"># split a
 <p>Now a customer asks, "Who approves a $15,000 wire?" The answer is "a manager" — but chunk <code>[0]</code> stops at "require manager" and chunk <code>[1]</code> starts at "approval." Neither chunk cleanly contains "manager approval," so the search may rank both low and the model answers weakly. Add a modest overlap and the phrase survives in one piece:</p>
 
 <pre><code>fixed = RecursiveCharacterTextSplitter(       <span class="cmt"># same splitter, one fix applied</span>
-    chunk_size=55,                            <span class="cmt"># unchanged size</span>
+    chunk_size=48,                            <span class="cmt"># unchanged size</span>
     chunk_overlap=12,                         <span class="cmt"># the fix: share ~12 characters across each seam</span>
     separators=[" ", ""],                     <span class="cmt"># same separators as before</span>
 )
@@ -6447,7 +6646,7 @@ for i, c in enumerate(fixed.split_text(rule)):  <span class="cmt"># split again 
 
 <pre><code>from langchain_text_splitters import CharacterTextSplitter  <span class="cmt"># the blunt splitter, which can overrun its size</span>
 
-long_block = "clause " * 400                  <span class="cmt"># a 2,400-character block with no paragraph breaks at all</span>
+long_block = "clause " * 400                  <span class="cmt"># a 2,800-character block with no paragraph breaks at all</span>
 
 splitter = CharacterTextSplitter(             <span class="cmt"># blunt splitter with its single separator</span>
     separator="\n\n",                         <span class="cmt"># it only cuts at blank lines — but there are none here</span>
@@ -6463,11 +6662,11 @@ print("biggest chunk size:", max(len(c) for c in chunks))  <span class="cmt"># h
 <div class="out">
   <div class="lbl">▶ Output</div>
 <pre><code>chunks: 1
-biggest chunk size: 2399
+biggest chunk size: 2799
 </code></pre>
 </div>
 
-<p>We asked for 200-character chunks and got a single 2,399-character monster, because there was no <code>"\n\n"</code> to cut on and CharacterTextSplitter won't try anything else. If your embedding model's limit is, say, 2,000 characters' worth of tokens, the tail of that chunk is thrown away — and you'd never know. The fix is the recursive splitter, which falls back to spaces and then characters and so always respects the size:</p>
+<p>We asked for 200-character chunks and got a single 2,799-character monster, because there was no <code>"\n\n"</code> to cut on and CharacterTextSplitter won't try anything else. If your embedding model's limit is, say, 2,000 characters' worth of tokens, the tail of that chunk is thrown away — and you'd never know. The fix is the recursive splitter, which falls back to spaces and then characters and so always respects the size:</p>
 
 <pre><code>from langchain_text_splitters import RecursiveCharacterTextSplitter  <span class="cmt"># the splitter that always finds a cut</span>
 
@@ -6481,7 +6680,7 @@ print("chunks:", len(chunks), "| biggest:", max(len(c) for c in chunks))  <span 
 
 <div class="out">
   <div class="lbl">▶ Output</div>
-<pre><code>chunks: 14 | biggest: 200
+<pre><code>chunks: 16 | biggest: 195
 </code></pre>
 </div>
 
@@ -6606,7 +6805,6 @@ print("600-token chunks:", hit_rate_at_k(questions, search_600, gold, k=5))  <sp
   <span class="chip">🏭 production</span>
 </p>
 </section>
-
 <h2 class="part">Knowledge Layer (RAG) — Embeddings &amp; Vector Search</h2>
 <p class="part-intro">This is the engine room of RAG: how a computer turns the <em>meaning</em> of text into numbers, how it finds the closest meanings in a flash across millions of passages, and every real knob — models, dimensions, index types, databases, filters — you'll turn to make it fast, cheap, and safe enough for a bank.</p>
 
@@ -6838,7 +7036,7 @@ print("dot(normalized):", round(q @ f, 3))          <span class="cmt"># ...plain
 <p>This is the kind we've met: one fixed-length vector (say 1536 numbers), almost all of them non-zero, packing the whole meaning of the text into a dense bundle. <strong>Dense</strong> is brilliant at paraphrase — "went below zero" finds "overdraft" — but it's fuzzy about exact strings. An account number like <code>4021-8876</code> or a code like "Regulation E" has no real "meaning" to spread across the map, so dense search can slide right past it.</p>
 
 <h4>Sparse embeddings — a vector that's mostly zeros</h4>
-<p>A <strong>sparse</strong> embedding has one slot for every word in a huge vocabulary — tens of thousands of slots — and nearly all of them are zero, with a non-zero weight only for the words that actually appear. This is the modern form of classic keyword search (the famous <strong>BM25</strong> algorithm is sparse). It <em>nails</em> exact matches: "Form 1099," an ISIN (a security's global ID code), a specific account number. Smarter learned sparse models like <strong>SPLADE</strong> even add a few related words ("overdraft" might also light up "NSF"), getting a touch of meaning while staying exact. The weakness is the mirror of dense: sparse is blind to pure paraphrase.</p>
+<p>A <strong>sparse</strong> embedding has one slot for every word in a huge vocabulary — tens of thousands of slots — and nearly all of them are zero, with a non-zero weight only for the words that actually appear. This is the modern form of classic keyword search (the famous <strong>BM25</strong> algorithm is sparse). It <em>nails</em> exact matches: "Form 1099," an ISIN (a security's global ID code), a specific account number. Smarter learned sparse models like <strong>SPLADE</strong> even add a few related words ("overdraft" might also light up "NSF," non-sufficient funds), getting a touch of meaning while staying exact. The weakness is the mirror of dense: sparse is blind to pure paraphrase.</p>
 
 <h4>Multi-vector / ColBERT — many little vectors, matched late</h4>
 <p>Instead of squashing a whole chunk into one vector, <strong>ColBERT</strong> keeps <em>one vector per word (token)</em>. A 100-word chunk becomes 100 small vectors. At search time it does <strong>late interaction</strong>: for each word in your question, it finds that word's best-matching word in the chunk, then adds up those best matches (this scoring is called <strong>MaxSim</strong>). It's like comparing two documents word-by-word instead of gist-to-gist, which captures fine detail that a single vector blurs away. The result is noticeably better retrieval — especially on unfamiliar, out-of-domain text — at the cost of storing <em>many</em> vectors per chunk. Newer versions (ColBERTv2, PLAID) shrink that storage a lot.</p>
@@ -6914,6 +7112,7 @@ print("dot(normalized):", round(q @ f, 3))          <span class="cmt"># ...plain
 
 <h4>Going deeper — hybrid search and how you fuse two rankings</h4>
 <p>Because dense and sparse fail in opposite ways, the production answer is almost never "pick one" — it's <strong>hybrid search</strong>: run a dense search <em>and</em> a sparse/BM25 search, then merge their two ranked lists into one. The catch is that their scores live on different scales (a BM25 score of 14.2 and a cosine of 0.81 can't be compared directly), so you can't just add them. The standard, robust fix is <strong>Reciprocal Rank Fusion (RRF)</strong>: throw away the raw scores and combine by <em>rank position</em> instead — a chunk that ranks #2 in dense and #1 in sparse scores higher than one that's #1 in dense but #40 in sparse. RRF needs no tuning and no score normalization, which is why most databases ship it as the default fusion.</p>
+<p><strong>The RRF sum, with real numbers.</strong> RRF scores each chunk as the sum over both lists of <code>1 / (k + rank)</code>, where <code>k</code> is a small constant (commonly 60) that stops the #1 slot from swamping everything. Take a BankAssist overdraft query. Chunk A ranks #2 in dense and #1 in sparse, so it scores <code>1/(60+2) + 1/(60+1)</code> ≈ 0.0161 + 0.0164 = <strong>0.0325</strong>. Chunk B ranks #1 in dense but a distant #40 in sparse: <code>1/(60+1) + 1/(60+40)</code> ≈ 0.0164 + 0.0100 = <strong>0.0264</strong>. Chunk A wins — the result that's strong in <em>both</em> lists beats the one that's brilliant in a single list and poor in the other, and notice that a BM25 score of 14.2 and a cosine of 0.81 never had to be put on the same scale.</p>
 <p>Some numbers to ground the tradeoffs. A dense vector is a fixed cost — 1536 floats no matter how long the text. A learned-sparse SPLADE vector stores only the handful of non-zero term weights, so it's compact and slots into the same inverted-index machinery that classic search engines already run. ColBERT is the heavyweight: storing one vector <em>per token</em> can mean 100× more vectors than dense, which is why early ColBERT indexes were enormous. ColBERTv2 and PLAID attack exactly that — compressing those token vectors and pruning the search — bringing storage down to something a few times larger than dense rather than a hundred times.</p>
 
 <div class="card">
@@ -7666,6 +7865,7 @@ hits = client.query_points(                       <span class="cmt"># run the ve
 
 <h4>MMR — kill the duplicates</h4>
 <p>Plain top-K has a blind spot: the 5 closest chunks might all be <em>near-copies</em> of each other — the same overdraft sentence repeated across five documents — so you waste all five slots on one fact and miss the related fact about waivers. <strong>MMR (Maximal Marginal Relevance)</strong> fixes this by balancing two goals: pick chunks that are <em>relevant to the query</em> but also <em>different from what's already picked</em>. The result is a diverse, non-redundant set that covers more of the answer. A tuning knob (often called <code>lambda</code>) slides between "pure relevance" and "maximum diversity."</p>
+<p><strong>MMR in numbers.</strong> MMR scores each remaining chunk as <code>λ·(relevance to query) − (1−λ)·(closeness to what you've already picked)</code>. A customer asks about fees; with λ=0.7 you've already kept C1 <em>"monthly maintenance fee $35"</em> (relevance 0.80). Two candidates now compete: C2 <em>"monthly maintenance fee is $35 per statement"</em> (relevance 0.78 but 0.95 similar to C1) scores <code>0.7·0.78 − 0.3·0.95 = 0.261</code>; C3 <em>"overdraft fee $35"</em> (relevance 0.70, only 0.40 similar to C1) scores <code>0.7·0.70 − 0.3·0.40 = 0.370</code>. C3 wins despite lower raw relevance — MMR skips the near-duplicate of C1 and surfaces a <em>different</em> fee, which is exactly the coverage the customer needed.</p>
 
 <h4>Score threshold — refuse to answer on thin evidence</h4>
 <p>A <strong>score threshold</strong> discards any chunk whose similarity falls below a floor. Its real value is the <em>empty result</em>: if <em>nothing</em> clears the bar, your best move is often to say "I don't have information on that" rather than let the model improvise from weak, barely-related text. In a bank, an honest "I can't find that" beats a confident, unfounded answer every time.</p>
@@ -7872,7 +8072,6 @@ print(len(hits), "results merged from 12 shards")      <span class="cmt"># scatt
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span> <span class="chip">📈 scale</span></p>
 </section>
-
 <h2 class="part">Knowledge Layer (RAG) — Smarter Retrieval</h2>
 <p class="part-intro">Plain search finds <em>similar</em> text; smart retrieval finds the <em>right</em> text. This chapter is the toolbox that turns a shaky RAG demo into an assistant a bank would trust — told as a story, one fix at a time.</p>
 
@@ -8628,7 +8827,7 @@ for r in reranked.results:                <span class="cmt"># results are sorted
 3 0.588
 51 0.301</div>
 
-<p>Look at candidate <strong>#42</strong>: it wasn't near the top of the stage-one net, but the reranker — reading it <em>against</em> the question — recognised it as the real answer and lifted it to first. That rescue is exactly what reranking buys you, and it's frequently the single highest-return upgrade you can add to a RAG system.</p>
+<p>Read the <code>index</code> column against the stage-one order, because that is where the rescue shows up in numbers. Stage one (best-first) had ranked these five candidates at positions 4 (<code>index&nbsp;3</code>), 8 (<code>index&nbsp;7</code>), 43 (<code>index&nbsp;42</code>), 52 (<code>index&nbsp;51</code>) and 89 (<code>index&nbsp;88</code>). After the cross-encoder reads each one <em>against</em> the question, the order flips to <code>42, 7, 88, 3, 51</code>: candidate <strong>#42</strong>, which the fast net had buried at rank 43, is lifted to <strong>first</strong> (score 0.983); <strong>#88</strong>, stranded at rank 89, jumps to third (0.642); and <strong>#3</strong> — stage one's 4th-best — slips to fourth (0.588). The reranker pulled two near-miss chunks up and pushed a confident-but-wrong one down. That rescue is exactly what reranking buys you, and it's frequently the single highest-return upgrade you can add to a RAG system.</p>
 
 <h4>Going deeper — candidate count, score thresholds, and which reranker</h4>
 <p>Two numbers govern reranking. The <strong>candidate count</strong> (how many stage-one results you rerank, often 50–100) is a recall-versus-latency dial: more candidates means the right chunk is more likely present for the judge to rescue, but every extra candidate is one more (question, chunk) pair the cross-encoder must read. The <strong>score threshold</strong> is a quiet quality win people forget: because a good reranker returns a calibrated relevance score, you can <em>drop</em> candidates below, say, 0.3 rather than always passing a fixed top-5 — so a question with only two genuinely relevant chunks sends two, not five padded with noise.</p>
@@ -8769,7 +8968,6 @@ print(reorder_for_attention(ranked))      <span class="cmt"># put the gold where
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
-
 <h2 class="part">Knowledge Layer (RAG) — Agentic &amp; Frontier RAG</h2>
 <p class="part-intro">Up to now, fetching documents has been a fixed conveyor belt: one search, every time, no matter the question. This chapter is about teaching the system to <em>think about retrieval itself</em> — to decide whether to look things up, to judge what it found, to search again when the first try was weak, and to connect dots across many documents. Same friendly bank, BankAssist, but a much smarter librarian.</p>
 
@@ -8880,6 +9078,18 @@ while True:                             <span class="cmt"># the agent loop: keep
 <div class="out"><div class="lbl">▶ Output</div>The overdraft item fee is $35. It can be waived once every 12 months as a courtesy, on request.</div>
 
 <p>Notice the model was never <em>forced</em> to search. It saw the question, judged that it needed policy text, asked for <code>search_policy</code>, read the result, and only then answered. For "explain compound interest," the same loop would skip the tool and answer on turn one. That freedom is the whole point.</p>
+
+<h4>A worked multi-hop run</h4>
+<p>The code above shows the <em>mechanism</em>; the real payoff is a <strong>multi-hop</strong> run, where the agent's second search is chosen <em>because of</em> what the first one returned. A customer asks, "I think I was charged an overdraft fee I shouldn't have been — can you check and waive it?" One search can't answer that: the agent must first see the account, <em>then</em> look up the rule. Watch the loop reason its way there, routing to a different tool on each hop.</p>
+
+<div class="out"><div class="lbl">▶ Trajectory log</div>hop 1 · decide → can't judge "shouldn't have been" without the account → call look_up_account("AC-88")   [routes to the live account API]
+        result → AC-88: overdraft fee $35 posted Tue 12 Nov; closing balance that day -$18
+hop 2 · decide → a real $35 fee exists, so now check the waiver rule → call search_policy("overdraft courtesy waiver")   [routes to the policy store]
+        result → Overdraft item fee $35; one courtesy waiver per 12 months; AC-88 has used none in the last 12 months
+stop   · enough to answer — no third hop needed
+answer → Yes: one $35 overdraft fee posted Tue 12 Nov. You still have your annual courtesy waiver, so I've requested it — the $35 will be reversed.</div>
+
+<p>The whole point is the <em>dependency between hops</em>: hop 2's query only exists because hop 1 confirmed a real fee, and the two hops hit <em>different</em> sources — the live API, then the policy store. A plain pipeline would fire one blind search and miss half the answer. The agent reads each result before choosing its next move, which is exactly what "decide, repeat, route" looks like inside one conversation — and why agentic RAG answers questions no single retrieval ever could.</p>
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood</div>
@@ -9309,7 +9519,7 @@ multi ← As a Gold customer who overdrew twice, what do I owe after my waiver?<
 
       <text x="150" y="88" fill="var(--muted)" font-size="10">owns</text>
       <text x="150" y="190" fill="var(--muted)" font-size="10">co-signs</text>
-      <text x="350" y="118" fill="var(--muted)" font-size="10">owns</text>
+      <text x="350" y="118" fill="var(--muted)" font-size="10">director of</text>
       <text x="520" y="132" fill="var(--muted)" font-size="10">holds</text>
     </g>
     <g fill="none" stroke="var(--accent)" stroke-width="2.2" marker-end="url(#g37s5-gr-ar)">
@@ -9334,8 +9544,8 @@ multi ← As a Gold customer who overdrew twice, what do I owe after my waiver?<
 <span class="cmt"># Cypher is the query language for a Neo4j property graph.</span>
 QUERY = """
 MATCH (a:Account {flagged: true})          // start at any flagged account
-MATCH (a)-[:OWNED_BY|CO_SIGNS*1..3]-(p:Person)   // walk 1 to 3 relationship hops to linked people
-MATCH (p)-[:OWNS]->(c:Company)-[:HOLDS]->(l:Loan {type: 'business'})  // reach their business loans
+MATCH (a)-[:OWNS|CO_SIGNS*1..3]-(p:Person)   // walk 1 to 3 relationship hops to linked people
+MATCH (p)-[:DIRECTOR_OF]->(c:Company)-[:HOLDS]->(l:Loan {type: 'business'})  // reach their business loans
 RETURN DISTINCT p.name AS person, c.name AS company, l.id AS loan_id   // return the connected results
 """
 <span class="cmt"># The *1..3 is the multi-hop part: it follows chains up to three links deep,</span>
@@ -9345,12 +9555,12 @@ records = neo4j_session.run(QUERY)         <span class="cmt"># run the walk agai
 subgraph = [dict(r) for r in records]      <span class="cmt"># the connected facts we retrieved</span>
 
 <span class="cmt"># Now hand the subgraph to the LLM as grounded context, exactly like text chunks:</span>
-context = "\n".join(f"{r['person']} owns {r['company']} holding loan {r['loan_id']}"
+context = "\n".join(f"{r['person']} directs {r['company']} holding loan {r['loan_id']}"
                     for r in subgraph)     <span class="cmt"># render the graph facts into readable lines</span>
 print(context)                             <span class="cmt"># this context grounds the final answer</span>
 </code></pre>
-<div class="out"><div class="lbl">▶ Output</div>Priya owns Acme Ltd holding loan BL-4471
-Omar owns Vega Traders holding loan BL-5093</div>
+<div class="out"><div class="lbl">▶ Output</div>Priya directs Acme Ltd holding loan BL-4471
+Omar directs Vega Traders holding loan BL-5093</div>
 
 <p>The <code>*1..3</code> is the magic: it follows chains up to three links deep in one query. That's the multi-hop connection a pile of text chunks can never surface, because the link between "this account" and "that business loan" was never written in a single sentence anywhere.</p>
 
@@ -10038,7 +10248,6 @@ for t in resp.output_parsed.triples:            <span class="cmt"># resp.output_
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
-
 <h2 class="part">Knowledge Layer (RAG) — Evaluation</h2>
 <p class="part-intro">A RAG system that "looks good in the demo" is a rumour, not a fact. This chapter shows you how to turn that rumour into numbers you can trust — so when BankAssist answers a customer, you already know how often it's right, and you'd catch it the moment it slips.</p>
 
@@ -10303,9 +10512,11 @@ print(f"hit={hit_rate} recall={recall} prec={precision} mrr={mrr} map={ap} ndcg=
 
 <h4>Answer relevancy — "did it actually answer what was asked?"</h4>
 <p><strong>Answer relevancy</strong> ignores truth entirely and asks only: does the response address the user's question, or does it wander, pad, or dodge? A faithful answer can still be irrelevant. If the customer asks "can the overdraft fee be waived?" and BankAssist replies with a perfectly accurate paragraph about <em>how overdrafts are calculated</em> but never mentions waiving, that's faithful (every word is true) yet low on relevancy (it didn't answer the question). A common way to measure it automatically: ask a model to generate a few questions that the answer <em>would</em> be a good reply to, then check how close those are to the real question.</p>
+<p><strong>Worked example.</strong> BankAssist answers the waiver question well. A judge reads only that answer and reverse-engineers three questions it would perfectly reply to: "How much is the overdraft fee?", "Can the overdraft fee be waived?", and "How often can I get an overdraft waiver?". Each is embedded and compared by cosine similarity to the real question ("What is the overdraft fee, and can it be waived?"), scoring 0.95, 0.92, and 0.89. Answer relevancy is their mean: (0.95 + 0.92 + 0.89) ÷ 3 = <strong>0.92</strong>. A rambling answer that also wandered into credit cards would generate off-topic questions, each with a low similarity, dragging the average down.</p>
 
 <h4>Answer correctness — "is it right, compared to the gold answer?"</h4>
 <p><strong>Answer correctness</strong> compares the answer to a human-written <em>reference answer</em> (your "gold" answer). It blends two things: factual overlap (does it state the same facts as the reference?) and semantic similarity (does it mean the same thing?). This is the closest metric to "is it simply correct," but it needs a gold answer for every test question — which is expensive to create and the reason you build a golden dataset — a curated set of questions paired with known-correct answers. Faithfulness and relevancy need <em>no</em> reference and can run on live traffic; correctness needs a reference and lives in your offline test set.</p>
+<p><strong>Worked example.</strong> Reference (gold): "Overdraft fee is $35, waivable once every 12 months on request." Answer: "The overdraft fee is $35; one courtesy waiver is allowed per year." Correctness blends two numbers. First, <em>factual</em> overlap over claims: both agree on "$35 fee" and "one waiver per year" (2 true positives), the answer states nothing false (0 false positives), and it drops the reference's "on request" detail (1 false negative). The factual F1 is TP ÷ (TP + 0.5 × (FP + FN)) = 2 ÷ (2 + 0.5 × (0 + 1)) = 2 ÷ 2.5 = <strong>0.80</strong>. Second, the <em>semantic</em> similarity of the two sentences' embeddings, say <strong>0.94</strong>. RAGAS combines them with its default weights 0.75 and 0.25: correctness = 0.75 × 0.80 + 0.25 × 0.94 = 0.60 + 0.235 = <strong>0.84</strong>. The factual half catches a changed fact; the semantic half forgives a reworded-but-equivalent answer.</p>
 
 <div class="compare">
   <div>
@@ -10348,6 +10559,7 @@ print(round(score, 2))                              <span class="cmt"># 1.0 here
 <div class="out"><div class="lbl">▶ Output</div>1.0</div>
 
 <p>Notice the division of labour: <code>Faithfulness</code> and <code>ResponseRelevancy</code> are <em>reference-free</em> (they only compare the answer to the question and the retrieved context), so you can run them on live production traffic. <code>LLMContextRecall</code> compares against the gold <code>reference</code>, so it belongs in your offline test set where references exist. (A note on versions: in recent RAGAS releases these capitalised metric classes are the current API, but importing names from <code>ragas.metrics</code> can raise a deprecation warning as the library reorganises — one more reason to pin the exact version in your project.)</p>
+<p><strong>What those two context metrics compute, worked.</strong> <code>LLMContextRecall</code> asks: of the claims in the <em>gold</em> answer, what fraction are supported by the retrieved chunks? If the gold answer makes 3 claims ("$35", "one waiver", "per 12 months") and the two retrieved chunks cover all 3, context recall = 3 ÷ 3 = <strong>1.0</strong>; had the "per 12 months" chunk been missed, it would be 2 ÷ 3 = <strong>0.67</strong>. <strong>Context precision</strong> is the ranking twin: it rewards putting the relevant chunks <em>above</em> the junk, and is computed exactly like the Average Precision from the retrieval section. For our earlier top-5 list with relevant chunks at ranks 2 and 4, context precision = (1/2 + 2/4) ÷ 2 = (0.5 + 0.5) ÷ 2 = <strong>0.5</strong>. So "context recall" reuses the recall idea against gold-answer claims, and "context precision" reuses AP against chunk ranks.</p>
 
 <h4>Going deeper — why faithfulness is the metric a bank watches hardest</h4>
 <p>Of the three, <strong>faithfulness is the compliance metric.</strong> A relevant-but-unfaithful answer — fluent, on-topic, and quietly wrong about a fee or a legal right — is exactly the output that gets a bank fined or sued. So faithfulness gets the strictest treatment: it is often run on a large sample of live traffic, gated in CI, and alerted on. The mechanics matter here. Because faithfulness decomposes the answer into atomic claims and checks each one against the context, a single fabricated clause drags the score down even if ninety percent of the answer is perfect — which is the behaviour you want, because that one clause is the one that hurts a customer.</p>
@@ -10447,6 +10659,7 @@ print(round(score, 2))                              <span class="cmt"># 1.0 here
 
 <h4>Going deeper — the triad's judges are themselves imperfect</h4>
 <p>It's tempting to treat the three triad numbers as truth. They aren't — they're the output of three LLM judges, each with its own accuracy. Public benchmarks of these exact judges are sobering and worth knowing. In early-2025 evaluations of a widely-used triad implementation (TruLens) using a strong default judge, the <strong>groundedness</strong> judge agreed with human labels at roughly 0.81 F1 (F1 is an accuracy-style score that blends precision and recall into one number, where 1.0 is a perfect match with the humans), <strong>answer relevance</strong> around 0.79 F1, and <strong>context relevance</strong> the hardest of the three at around 0.64 F1 on a standard retrieval benchmark. The lesson isn't "don't use the triad" — it's "know that context relevance is the noisiest edge, and don't over-react to a small wobble on it."</p>
+<p><strong>How that F1 is computed, worked.</strong> Treat the groundedness judge as a classifier that labels each answer "grounded" or "not," then compare it to the human labels. Say that over a batch it catches 76% of the answers humans called grounded (recall = 0.76) and, of the answers it <em>calls</em> grounded, 86% truly are (precision = 0.86). F1 is their harmonic mean: 2 × precision × recall ÷ (precision + recall) = 2 × 0.86 × 0.76 ÷ (0.86 + 0.76) = 1.3072 ÷ 1.62 = <strong>0.81</strong> — the groundedness figure above. The harmonic mean (rather than a plain average) punishes a judge that scores well on one and badly on the other, so one number can't hide a lopsided judge that, say, flags everything as grounded.</p>
 <p>Teams improve these judges the same way you'd improve any prompt: by optimising the rubric. The same 2025 work found that instructing the context-relevance judge to be deliberately "critical and strict" measurably reduced its tendency to rate marginal chunks as relevant (leniency bias), and that prompt optimisation lifted groundedness precision by roughly 16 points at a small recall cost. In other words, the triad is a starting point you tune against your own human labels, not a finished oracle you install.</p>
 
 <div class="card">
@@ -10619,6 +10832,7 @@ ANSWER: {answer}"""                            <span class="cmt"># reasoning-bef
 
 <h4>Going deeper — agreement is the number that validates every other number</h4>
 <p>Here is the idea that separates a serious eval program from theatre: <strong>your judge's credibility is a measurable number, and you must publish it.</strong> Take a few hundred answers, have humans label them, run the judge on the same answers, and compute how often they agree (accuracy, or better, Cohen's kappa which corrects for chance agreement). That single figure — say "our faithfulness judge agrees with human compliance reviewers 91% of the time" — is what lets anyone trust the thousands of answers the judge grades unattended. Without it, every downstream score is a guess dressed as a measurement.</p>
+<p><strong>Why kappa, not raw agreement — worked.</strong> Check the faithfulness judge against a human on 100 answers. They agree on 85, so raw agreement is 0.85 — reassuring, until you account for chance. Lay out the 100: both say "faithful" 70 times, both say "unfaithful" 15 times, and they disagree 15 times (judge "faithful" / human "unfaithful" 10, the reverse 5). So the judge calls 80/100 faithful and the human calls 75/100 faithful. By chance alone they'd agree (0.80 × 0.75) + (0.20 × 0.25) = 0.60 + 0.05 = <strong>0.65</strong> of the time. Cohen's kappa strips that out: κ = (observed − chance) ÷ (1 − chance) = (0.85 − 0.65) ÷ (1 − 0.65) = 0.20 ÷ 0.35 = <strong>0.57</strong>. An impressive-looking 85% agreement is really only "moderate" once chance is removed — exactly the correction a bank wants before it trusts a judge to grade unattended.</p>
 <p>What counts as "good enough" agreement depends on stakes. For a low-risk relevancy signal, 80% might be fine. For a faithfulness judge standing between BankAssist and a compliance incident, you want agreement comparable to how often two human reviewers agree with <em>each other</em> (inter-annotator agreement) — because a judge can't reasonably be held to a higher bar than humans hit. If humans only agree 85% of the time on what "faithful" means, your rubric itself is ambiguous and needs tightening before the judge can do better.</p>
 
 <div class="card">
@@ -10882,7 +11096,6 @@ def test_answer_quality(record):
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
-
 <h2 class="part">AI Agents — The agent loop &amp; when to use one</h2>
 <p class="part-intro">Let's meet the AI that doesn't just answer — it decides what to do next, takes an action, looks at the result, and keeps going until the job is done. We'll build the idea slowly, in plain words, with our bank "BankAssist" as the running example.</p>
 
@@ -11546,7 +11759,6 @@ for step in range(MAX_STEPS):           <span class="cmt"># guard vs INFINITE LO
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
-
 <h2 class="part">AI Agents — Tools &amp; Function Calling</h2>
 <p class="part-intro">A chatbot can only talk. An agent can <em>act</em> — check a balance, look up a policy, freeze a lost card — and the bridge from talking to acting is a single idea called a <strong>tool</strong>. This chapter tells the whole story of tools, from "what even is one" to the hard-won production habits that keep a money-moving agent safe.</p>
 
@@ -12639,7 +12851,6 @@ final_answer(f"Your 30-day average balance is ${avg}")  <span class="cmt"># hand
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🔐 security</span></p>
 </section>
-
 <h2 class="part">AI Agents — Reasoning &amp; Planning</h2>
 <p class="part-intro">An agent is just a language model put in charge of a job — but a model that answers in one breath makes careless mistakes. This chapter is about the "thinking" half of an agent: the handful of patterns that let it slow down, work step by step, check itself, split a big job into small ones, and change course when the world surprises it.</p>
 
@@ -13687,7 +13898,6 @@ for step in range(MAX_STEPS):        <span class="cmt"># GUARDRAIL 1: never loop
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
-
 <h2 class="part">AI Agents — Memory &amp; Context Engineering</h2>
 <p class="part-intro">An agent is only as good as what it can remember and what it chooses to look at right now — so let's learn, in plain words, how to give BankAssist a memory it can trust and a workspace it keeps tidy.</p>
 
@@ -14659,7 +14869,6 @@ agent = create_agent(                          <span class="cmt"># current LangC
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
-
 <h2 class="part">AI Agents — MCP, A2A &amp; Protocols</h2>
 <p class="part-intro">An AI agent is only as useful as the things it can reach — its tools, its data, its fellow agents, and its human. This chapter tells the story of the four plugs that let an agent reach them all, using plain words and a running example from a bank called BankAssist.</p>
 
@@ -15328,7 +15537,6 @@ def get_balance(account_id: str) -&gt; Balance:       <span class="cmt"># return
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🔌 protocols</span></p>
 </section>
-
 <h2 class="part">AI Agents — Architectures &amp; Multi-Agent Patterns</h2>
 <p class="part-intro">An agent is just a language model put in a loop with some tools and a goal. This chapter is the quiet art of <em>shape</em> — how to arrange one agent, or many, so the thing actually works, stays affordable, and never moves a customer's money by accident.</p>
 
@@ -16738,7 +16946,6 @@ with PostgresSaver.from_conn_string(DB_URL) as saver:  <span class="cmt"># one d
   <p><strong>Teams, then a boss over the team leads.</strong> A compiled team is just a node — <code>.compile(name=...)</code> and drop it into the next supervisor. Each layer costs one more routing call, so add layers only when the org chart truly needs them.</p>
 </div>
 </section>
-
 <h2 class="part">Frameworks — LangChain, LangGraph &amp; more</h2>
 <p class="part-intro">A friendly, hands-on tour of the toolkits teams reach for when building AI apps — what each one is really for, the current (2026) way to use it, and the honest answer to "do I even need one?" — all told through our running bank, <strong>BankAssist</strong>.</p>
 
@@ -19845,7 +20052,6 @@ print(review.invoke(Command(resume="approve"), cfg))         <span class="cmt">#
 </div>
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span></p>
 </section>
-
 <h2 class="part">Fine-Tuning &amp; Model Adaptation</h2>
 <p class="part-intro">RAG lends a model the right pages to read; fine-tuning actually re-wires how the model thinks and speaks. This chapter takes you from "fine-tuning exists" all the way to training a small open model on one GPU, aligning it to your bank's voice, and serving it in production — in plain words, with real, current code.</p>
 
@@ -21308,7 +21514,6 @@ Qwen3-32B sharded: ~4.1 GB params / GPU (was ~64 GB unsharded)
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
-
 <h2 class="part">Evaluation &amp; Production — Evaluating Agents</h2>
 <p class="part-intro">A clever agent demo is easy; a <em>trustworthy</em> one is hard. This chapter is a calm, hands-on tour of how you actually measure whether a banking agent works — not once, but reliably, safely, and the same way tomorrow as today.</p>
 
@@ -22665,7 +22870,6 @@ for c in range(8):
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span> <span class="chip">📊 analytics</span> <span class="chip">🔒 privacy</span></p>
 </section>
-
 <h2 class="part">Evaluation &amp; Production — Reliability, Observability &amp; Cost</h2>
 <p class="part-intro">A clever agent that works in a demo is easy. An agent that stays correct, visible, and affordable while thousands of real customers hammer it at 2 a.m. is the real job — so let's walk through exactly how banks keep one alive, honest, and cheap.</p>
 
@@ -24705,7 +24909,6 @@ def handle(kind, prompt):                               <span class="cmt"># entr
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span> <span class="chip">🧱 resilience</span> <span class="chip">🏗️ system design</span></p>
 </section>
-
 <h2 class="part">Evaluation &amp; Production — LLMOps &amp; Deployment</h2>
 <p class="part-intro">Building a clever agent is one thing; shipping it, versioning it, scaling it, and keeping it healthy for years in a bank is another job entirely — this chapter is the engineering machinery around the model, told as plainly as the rest.</p>
 
@@ -27112,7 +27315,6 @@ log_event(user="cust_88421", experiment="overdraft-prompt-v13", arm=arm)  <span 
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span> <span class="chip">🧪 experimentation</span></p>
 </section>
-
 <h2 class="part">Security &amp; Governance — Core Defenses</h2>
 <p class="part-intro">Everything so far taught your assistant to be <em>helpful</em>. This chapter teaches it to be <em>trustworthy</em> — because the moment an AI can read a customer's data or move their money, "mostly works" is not good enough, and a regulator will ask you to prove it.</p>
 
@@ -28208,7 +28410,6 @@ def quality_parity(agent, golden_by_lang, min_gap=0.05):  <span class="cmt"># mi
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span> <span class="chip">⚖️ fairness</span></p>
 </section>
-
 <h2 class="part">Security &amp; Governance — Frameworks, Tools &amp; Gateways</h2>
 <p class="part-intro">You already understand the <em>ideas</em> behind AI security — injection, the confused deputy, least privilege. This chapter gives you the industry's shared vocabulary for them: the named checklists auditors expect, the threat-modelling methods, the governance standards, and the real tools you bolt on to make a banking assistant safe in production.</p>
 
@@ -29032,7 +29233,6 @@ print(result.status)                      <span class="cmt"># 'success' = the fl
 </div>
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🔒 security</span></p>
 </section>
-
 <h2 class="part">Platforms &amp; APIs — OpenAI Platform Essentials</h2>
 <p class="part-intro">A friendly tour of the OpenAI platform plumbing that every banking AI project leans on — which API to call, which tools to host, how to teach a model new behaviour, and how to run big jobs cheaply and safely without surprising your finance team or your regulator.</p>
 
@@ -30871,7 +31071,6 @@ resp = client.responses.create(
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🔐 compliance</span></p>
 </section>
-
 <h2 class="part">Platforms &amp; APIs — Cloud: AWS, Azure &amp; Google</h2>
 <p class="part-intro">Almost no bank builds its AI from bare metal up. It picks a cloud — Amazon, Microsoft, or Google — and builds on the managed AI stack that cloud already runs for it. This chapter is a calm, honest tour of all three, and of the one decision under all of them: let the cloud manage it, or build it yourself.</p>
 
@@ -32665,7 +32864,6 @@ az cognitiveservices account deployment create \
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">☁️ Azure</span> <span class="chip">🔐 governance</span></p>
 </section>
-
 <h2 class="part">Infrastructure &amp; Serving — Running the Model Yourself</h2>
 <p class="part-intro">So far the model has lived somewhere else — you sent a request over the internet and an answer came back. This chapter is about the day a bank decides to run the model <em>inside its own walls</em>: why you'd do that, which tools actually serve a model, and the handful of ideas (KV cache, batching, quantization) that decide whether it's fast, affordable, and fits on the GPU you have.</p>
 
@@ -33496,7 +33694,6 @@ console.log(result);                             <span class="cmt">// [{ label: 
   <p><strong>Transformers.js = the model comes to the data, not the data to the model.</strong> Small tasks, in the browser, on the user's own GPU — the most private spot of all, because the text never leaves the tab.</p>
 </div>
 </section>
-
 <h2 class="part">System Design — End-to-End Blueprints</h2>
 <p class="part-intro">This is the capstone, where every idea in the book finally snaps together into real systems you could draw on a whiteboard, defend to an architect, and run for a bank. We'll reason through three full designs the way a calm senior engineer would — out loud, tradeoff by tradeoff.</p>
 
@@ -34426,7 +34623,6 @@ def search(query, user, page=0):
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span> <span class="chip">🧭 capstone</span></p>
 </section>
-
 <h2 class="part">Specialized Agents — Voice, Coding &amp; Channels</h2>
 <p class="part-intro">The same reasoning brain can answer a phone call, fix a bug in your codebase, reply to an email, and switch to Spanish mid-sentence — if you dress it correctly for each job. This chapter is a friendly tour of the specialized agents banks actually ship, and the small, careful decisions that make each one safe.</p>
 
@@ -36249,7 +36445,6 @@ agent = Agent(                                      <span class="cmt"># the pers
   <p>The framework runs the <strong>media plane</strong> (WebRTC, STUN/TURN, SFU rooms, SIP trunks) so you can focus on the <strong>pipeline</strong> (STT → LLM → TTS). <strong>LiveKit</strong> = the backbone, <strong>Pipecat</strong> = the open pipeline, <strong>Vapi</strong> = the managed shortcut. And always test TURN.</p>
 </div>
 </section>
-
 <h2 class="part">Interview Prep — Questions from Basic to Advanced</h2>
 <p class="part-intro">A current (2025–2026) question bank for RAG and agentic-AI engineering roles, graded Basic → Intermediate → Advanced. Each answer is a complete answer you could actually teach: a crisp reply first, then the why, a concrete BankAssist example, the trade-off that decides it, and the extra line a strong candidate adds — then the banking system-design prompts to rehearse.</p>
 
@@ -36669,7 +36864,6 @@ agent = Agent(                                      <span class="cmt"># the pers
 
 <div class="tipbox">✅ Across every round the meta-signal is the same: <strong>reason out loud, state your assumptions, name the trade-off, and say how you'd measure success.</strong> Interviewers hire the candidate who makes their thinking visible — a slightly-wrong answer with clear reasoning usually beats a right answer with none.</div>
 </section>
-
 <h2 class="part">Reference — Glossary &amp; Key Terms</h2>
 <p class="part-intro">Every key term and acronym in the book, in one place — skim it now, come back whenever a term is unfamiliar.</p>
 
@@ -37056,7 +37250,6 @@ agent = Agent(                                      <span class="cmt"># the pers
 </div>
 </section>
 
-
 <hr>
 <p class="chips" style="color:var(--faint);font:400 12px/1.6 -apple-system,Segoe UI,Roboto,sans-serif">
 📘 <strong>AI Engineering — Banking Edition.</strong> A friendly, illustrated, end-to-end guide to RAG and AI agents, taken from first principles to production. Cross-checked against the AI-Engineer and AI-Agents roadmaps, the course syllabi, and the OpenAI / LangChain / Azure docs.</p>
@@ -37286,4 +37479,3 @@ agent = Agent(                                      <span class="cmt"># the pers
 </script>
 </body>
 </html>
-
