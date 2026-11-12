@@ -3597,18 +3597,21 @@ print(resp.output_text)                                <span class="cmt"># the m
 <p>Under the calm analogy is a very ordinary mechanism. Once the right chunks are fetched, you don't do anything clever — you paste them into the prompt above the question and ask the model to answer <em>from that text</em>. Here is the "generation" half in a few real lines of OpenAI code:</p>
 
 <pre><code><span class="cmt"># BankAssist answers using retrieved policy text, not its own memory.</span>
+from langchain_core.documents import Document  <span class="cmt"># LangChain's chunk type: page_content + metadata</span>
 from openai import OpenAI              <span class="cmt"># official OpenAI Python client</span>
 client = OpenAI()                      <span class="cmt"># reads OPENAI_API_KEY from the environment</span>
 
-retrieved = [                          <span class="cmt"># each chunk the retriever found, WITH where it came from</span>
-    {"text": "Overdraft item fee: $35 per item.",
-     "source": "Deposit Account Agreement §4.2"},
-    {"text": "One courtesy overdraft waiver is allowed per 12 months on request.",
-     "source": "Deposit Account Agreement §4.3"},
+retrieved = [                          <span class="cmt"># each chunk the retriever found, as LangChain Documents</span>
+    Document(page_content="Overdraft item fee: $35 per item.",
+             metadata={"source": "Deposit Account Agreement", "section": "§4.2"}),
+    Document(page_content="One courtesy overdraft waiver is allowed per 12 months on request.",
+             metadata={"source": "Deposit Account Agreement", "section": "§4.3"}),
 ]
 question = "How much is the overdraft fee, and can it be waived?"  <span class="cmt"># the customer's question</span>
 
-context = "\n".join(f"[{c['source']}] {c['text']}" for c in retrieved)  <span class="cmt"># tag each line with its source</span>
+context = "\n".join(                     <span class="cmt"># tag each line with its source + section, for the citation</span>
+    f"[{d.metadata['source']} {d.metadata['section']}] {d.page_content}" for d in retrieved
+)
 prompt = (                             <span class="cmt"># the augmented prompt: context THEN question</span>
     "Answer ONLY from the context below, and cite the source in [brackets]. "
     "If the answer is not there, say you don't know.\n\n"
@@ -3631,20 +3634,21 @@ print(resp.choices[0].message.content) <span class="cmt"># the grounded, quotabl
 <pre><code><span class="cmt"># Retrieval from scratch: real embeddings, the cosine match written out by hand.</span>
 import math
 from openai import OpenAI
+from langchain_core.documents import Document  <span class="cmt"># LangChain's chunk type: page_content + metadata</span>
 client = OpenAI()                      <span class="cmt"># reads OPENAI_API_KEY from the environment</span>
 
 chunks = [                             <span class="cmt"># the knowledge base, each chunk tagged with its source</span>
-    {"text": "Overdraft item fee: $35 per item.",
-     "source": "Deposit Account Agreement §4.2"},
-    {"text": "One courtesy overdraft waiver is allowed per 12 months on request.",
-     "source": "Deposit Account Agreement §4.3"},
+    Document(page_content="Overdraft item fee: $35 per item.",
+             metadata={"source": "Deposit Account Agreement", "section": "§4.2"}),
+    Document(page_content="One courtesy overdraft waiver is allowed per 12 months on request.",
+             metadata={"source": "Deposit Account Agreement", "section": "§4.3"}),
 ]
 question = "How much is the overdraft fee, and can it be waived?"
 
 <span class="cmt"># 1. Embed chunks and question with the SAME model — 1536 numbers each.</span>
 data = client.embeddings.create(
     model="text-embedding-3-small",
-    input=[c["text"] for c in chunks],
+    input=[d.page_content for d in chunks],
 ).data
 q_vec = client.embeddings.create(
     model="text-embedding-3-small",
@@ -3658,10 +3662,12 @@ def cosine(a, b):
     return dot / norm
 
 scored = sorted(zip(chunks, data), key=lambda p: cosine(q_vec, p[1].embedding), reverse=True)
-retrieved = [c for c, _ in scored[:2]]  <span class="cmt"># top-K most similar chunks</span>
+retrieved = [doc for doc, _ in scored[:2]]  <span class="cmt"># top-K most similar chunks</span>
 
 <span class="cmt"># 3. Ground the question in the retrieved text, then generate.</span>
-context = "\n".join(f"[{c['source']}] {c['text']}" for c in retrieved)
+context = "\n".join(
+    f"[{d.metadata['source']} {d.metadata['section']}] {d.page_content}" for d in retrieved
+)
 prompt = (
     "Answer ONLY from the context below, and cite the source in [brackets]. "
     "If the answer is not there, say you don't know.\n\n"
@@ -3685,10 +3691,10 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
 docs = [                                <span class="cmt"># same two policy chunks, as LangChain documents</span>
-    Document("Overdraft item fee: $35 per item.",
-             metadata={"source": "Deposit Account Agreement §4.2"}),
-    Document("One courtesy overdraft waiver is allowed per 12 months on request.",
-             metadata={"source": "Deposit Account Agreement §4.3"}),
+    Document(page_content="Overdraft item fee: $35 per item.",
+             metadata={"source": "Deposit Account Agreement", "section": "§4.2"}),
+    Document(page_content="One courtesy overdraft waiver is allowed per 12 months on request.",
+             metadata={"source": "Deposit Account Agreement", "section": "§4.3"}),
 ]
 vectorstore = Chroma.from_documents(    <span class="cmt"># embeds the docs and stores the vectors</span>
     docs, OpenAIEmbeddings(model="text-embedding-3-small"))
@@ -3699,8 +3705,8 @@ prompt = ChatPromptTemplate.from_template(
     "If the answer is not there, say you don't know.\n\n"
     "Context:\n{context}\n\nQuestion: {question}")
 
-def format_docs(ds):                    <span class="cmt"># tag each retrieved chunk with its source</span>
-    return "\n".join(f"[{d.metadata['source']}] {d.page_content}" for d in ds)
+def format_docs(ds):                    <span class="cmt"># tag each retrieved chunk with its source + section</span>
+    return "\n".join(f"[{d.metadata['source']} {d.metadata['section']}] {d.page_content}" for d in ds)
 
 chain = (                               <span class="cmt"># LCEL: retrieve → prompt → llm → parse</span>
     {"context": retriever | format_docs, "question": RunnablePassthrough()}
@@ -5117,31 +5123,47 @@ print(f"result: {changed}/{len(before)} chunks changed — the hash-diff saved n
 </ul>
 
 <pre><code>import re                                          <span class="cmt"># regular expressions: for spotting repeated junk patterns</span>
+from langchain_core.documents import Document      <span class="cmt"># the chunk type the whole pipeline passes around</span>
 
-def clean_page(text, section_path, source, page, updated, acl):
+def clean_page(text, section, source, source_id, page, updated, acl) -&gt; Document:
     text = re.sub(r"Page \d+ of \d+.*", "", text)  <span class="cmt"># delete the repeating footer ("Page 7 of 48 …")</span>
     text = re.sub(r"BankAssist — Internal", "", text)  <span class="cmt"># delete the repeating header stamp</span>
     text = re.sub(r"(\w+)-\n(\w+)", r"\1\2", text) <span class="cmt"># rejoin words split by a hyphen at a line break</span>
     text = re.sub(r"[ \t]+", " ", text)            <span class="cmt"># collapse runs of spaces/tabs into one space</span>
     text = re.sub(r"\n{3,}", "\n\n", text).strip() <span class="cmt"># squeeze 3+ blank lines down to a single gap</span>
-    return {                                        <span class="cmt"># return clean text PLUS its labels, bundled together</span>
-        "text": text,                              <span class="cmt"># the scrubbed body — what we'll embed</span>
-        "section_path": section_path,              <span class="cmt"># KEEP hierarchy, e.g. "Home Loans &gt; 4 Fees &gt; 4.2 Early closure"</span>
+    return Document(page_content=text, metadata={   <span class="cmt"># clean text PLUS its labels, as one Document</span>
         "source": source,                          <span class="cmt"># KEEP so we can cite the exact file</span>
+        "source_id": source_id,                    <span class="cmt"># KEEP so update/delete/reconcile can find it</span>
         "page": page,                              <span class="cmt"># KEEP so the citation says "page 12"</span>
+        "section": section,                        <span class="cmt"># KEEP hierarchy, e.g. "Home Loans &gt; 4 Fees &gt; 4.2 Early closure"</span>
         "updated": updated,                        <span class="cmt"># KEEP so we can show/trust freshness</span>
         "acl": acl,                                <span class="cmt"># KEEP so retrieval enforces who may see it</span>
-    }
+    })
 
 chunk = clean_page(
     "BankAssist — Internal\nEarly-closure fee is 1% of the out-\nstanding balance.\nPage 12 of 48 · Confidential",
-    "Home Loans &gt; 4 Fees &gt; 4.2 Early closure",
-    "Home_Loan_Terms_2026.pdf", 12, "2026-01-15", "mortgages-team")
-print(chunk["text"])                               <span class="cmt"># confirm the junk is gone and the word is rejoined</span>
+    "Home Loans &gt; 4 Fees &gt; 4.2 Early closure", "Home_Loan_Terms_2026.pdf",
+    "s3:policies/home_loan_terms.pdf", 12, "2026-01-15", "mortgages-team")
+print(chunk.page_content)                           <span class="cmt"># confirm the junk is gone and the word is rejoined</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>Early-closure fee is 1% of the outstanding balance.</code></p></div>
 
-<p>The footer and header vanished, "out-\nstanding" became "outstanding," and yet the chunk still knows it's from page 12 of the mortgage terms, under section 4.2, visible to the mortgages team. That bundle of text-plus-labels is what moves down the pipeline.</p>
+<p>The footer and header vanished, "out-\nstanding" became "outstanding," and yet the chunk still knows it's from page 12 of the mortgage terms, under section 4.2, visible to the mortgages team. That <code>Document</code> of text-plus-metadata is what moves down the pipeline.</p>
+
+<div class="card">
+  <div class="lbl">📇 The chunk metadata schema</div>
+  <p>Every chunk in these chapters travels as a LangChain <code>Document</code> carrying these exact fields. Reuse the names everywhere — don't invent <code>heading_path</code> or <code>doc_source</code> when <code>section</code> and <code>source</code> already mean that.</p>
+  <ul>
+    <li><code>source</code> — human-readable origin (file name or URL), for the <strong>citation</strong> shown to the user.</li>
+    <li><code>source_id</code> — stable id of the whole document, for <strong>update, delete and reconcile</strong>.</li>
+    <li><code>page</code> — page number (PDFs) or slide number, for the citation.</li>
+    <li><code>section</code> — the heading path, e.g. <code>"Home Loans &gt; 4 Fees &gt; 4.2"</code>, for citation, metadata filtering and context.</li>
+    <li><code>acl</code> — the audience allowed to see it: the <strong>security filter the retriever enforces</strong>.</li>
+    <li><code>parent_id</code> — the parent chunk's id, for <strong>parent-child retrieval</strong>.</li>
+    <li><code>version</code> or <code>content_hash</code> — for <strong>freshness and dedup</strong>.</li>
+    <li><code>updated</code> — an ISO date, for the freshness shown with an answer.</li>
+  </ul>
+</div>
 
 <div class="warn">
   <div class="lbl">⚠ Don't read this as "write a regex per document"</div>
@@ -5397,6 +5419,16 @@ print("\n".join(rows))                             <span class="cmt"># each line
 
 <p>The trick is the <code>zip(header, r)</code> — it marries every value to its column name so "6.9%" never floats away from "30-year." For heavily ruled financial tables, <strong>Camelot</strong> (<code>camelot.read_pdf(path, flavor="lattice")</code>) is a strong alternative that reads the cell borders directly.</p>
 
+<p><strong>How to chunk this.</strong> One chunk per table — never split mid-row. Keep the table as Markdown in <code>page_content</code>; for a table too big for one chunk, split by row <em>groups</em> and repeat the header row in each piece. The caption becomes the <code>section</code>.</p>
+<pre><code>from langchain_core.documents import Document
+
+md = "| Term | Rate |\n|---|---|\n" + "\n".join(      <span class="cmt"># keep the table as Markdown — rows survive</span>
+    f"| {t} | {r} |" for t, r in [("15-year", "6.2%"), ("20-year", "6.5%"), ("30-year", "6.9%")])
+doc = Document(page_content=md, metadata={            <span class="cmt"># one Document for the whole table</span>
+    "source": "rate_card_2026.pdf", "source_id": "s3:policies/rate_card_2026.pdf",
+    "page": 1, "section": "Fixed mortgage rate card"})  <span class="cmt"># section = the table's caption</span>
+</code></pre>
+
 <div class="card">
   <div class="lbl">⚙️ Under the hood</div>
   <p>Why Markdown/HTML for storage instead of just text? Because they encode <em>structure</em> a model already understands. Merged cells, spanning headers, and nested columns survive as HTML <code>rowspan</code>/<code>colspan</code> or Markdown pipes. When the LLM later reads a retrieved table, that structure helps it answer "what's the fee in the third tier?" correctly. For a very wide or very long table, also emit a short NL summary and embed <em>that</em> for discovery, while keeping the full table as the citation payload.</p>
@@ -5492,6 +5524,14 @@ print(caption)                                       <span class="cmt"># verify 
 <div class="out"><div class="lbl">▶ Output</div><p><code>Bar chart of default rate by region: Region C highest at 4.1%, Region A lowest at 1.2%; overall rising left to right.</code></p></div>
 
 <p>The prompt is doing the real work: "state every value" forces the model to pull the numbers off the axes instead of writing a vague "a chart showing default rates." You embed that caption for discovery and keep the original image as the thing a human can click to verify.</p>
+
+<p><strong>How to chunk this.</strong> The vision <em>caption</em> is the chunk's <code>page_content</code>; keep the image file as the citation through an <code>image</code> ref in metadata.</p>
+<pre><code>from langchain_core.documents import Document
+
+doc = Document(page_content=caption, metadata={      <span class="cmt"># the caption is what gets embedded</span>
+    "source": "mortgage_fees_2026.pdf", "source_id": "s3:policies/mortgage_fees_2026.pdf",
+    "page": 12, "image": "figures/p12_41.png", "section": "Default rates by region"})
+</code></pre>
 
 <h4>OCR for scanned documents</h4>
 <p><strong>OCR</strong> (Optical Character Recognition) turns a picture of text back into actual characters. Under the hood it finds the text regions on the page, slices them into lines and then into individual letter shapes, and matches each shape to the character it most closely resembles. You need it whenever a PDF is a <em>scan</em> — a photographed loan agreement, an old signed KYC form — because those have no text layer at all. The usual tools:</p>
@@ -5768,7 +5808,7 @@ for kv in (result.key_value_pairs or []):                 <span class="cmt"># fo
 
 <div class="qa">
   <div class="q">Q. "Which PDF parser do you use?" — and the real follow-up, "why that one?"</div>
-  <div class="a">A. There is no single answer; it depends on the page. PyMuPDF for born-digital text and images because it is fast and gives positions; pdfplumber or Camelot when tables are the point; Tesseract for cheap on-prem OCR; and Azure AI Document Intelligence (or Textract / Document AI) for scanned forms where you need structured fields, confidence scores, and data-residency compliance. <strong>Strong answer adds:</strong> you don't pick one — you run the cheap extractor first and escalate only the pages that fail to the expensive one, which is the tiered pipeline in the next topic. Naming the <em>licence</em> trap (PyMuPDF is AGPL) and the <em>compliance</em> reason a bank picks a specific cloud shows real production experience.</p></div>
+  <div class="a">A. There is no single answer; it depends on the page. PyMuPDF for born-digital text and images because it is fast and gives positions; pdfplumber or Camelot when tables are the point; Tesseract for cheap on-prem OCR; and Azure AI Document Intelligence (or Textract / Document AI) for scanned forms where you need structured fields, confidence scores, and data-residency compliance. <strong>Strong answer adds:</strong> you don't pick one — you run the cheap extractor first and escalate only the pages that fail to the expensive one, which is the tiered pipeline in the next topic. Naming the <em>licence</em> trap (PyMuPDF is AGPL) and the <em>compliance</em> reason a bank picks a specific cloud shows real production experience.</div>
 </div>
 </section>
 
@@ -5845,6 +5885,17 @@ def parse_pdf(path):
     return out                                      <span class="cmt"># tier-1 handled most pages; vision touched only the hard ones</span>
 </code></pre>
 <p>The whole design lives in one line: <code>if len(text.strip()) &lt; 30</code>. That character-count heuristic decides, per page, whether the cheap parser was good enough or whether this page deserves the expensive one. Most pages pass; your bill stays small; the hard pages still get read.</p>
+
+<p><strong>How to chunk this.</strong> For born-digital prose, split with a token-sized <code>RecursiveCharacterTextSplitter</code> (~500 tokens, ~80 overlap), carrying <code>source</code>, <code>page</code> and <code>section</code> onto every chunk, then apply the token-limit guard (see the Chunking chapter).</p>
+<pre><code>from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+
+splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(chunk_size=500, chunk_overlap=80)
+page = Document(page_content=page_text, metadata={    <span class="cmt"># one page's extracted prose + its labels</span>
+    "source": "home_loan_terms.pdf", "source_id": "s3:policies/home_loan_terms.pdf",
+    "page": 12, "section": "Home Loans &gt; 4 Fees &gt; 4.2 Early closure"})
+chunks = splitter.split_documents([page])            <span class="cmt"># metadata rides onto every chunk</span>
+</code></pre>
 
 <div class="tipbox">
   <div class="lbl">✅ Tip</div>
@@ -5924,6 +5975,14 @@ print("\n".join(render(record)))                   <span class="cmt"># a flat-bu
 
 <p>Every value still carries its path, so an embedding of "accounts.0.balance: 4210.5" means something, while a raw "4210.5" would not.</p>
 
+<p><strong>How to chunk this.</strong> One chunk per record/object — never split mid-object — with the key paths flattened into readable text and a stable record id in metadata.</p>
+<pre><code>from langchain_core.documents import Document
+
+docs = [Document(page_content="\n".join(render(rec)),  <span class="cmt"># render() = the path:value flattener above</span>
+                 metadata={"source": "customers.jsonl", "source_id": rec["customer"]})
+        for rec in [record]]                          <span class="cmt"># one Document per JSON record</span>
+</code></pre>
+
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
   <p>BankAssist ingests a nightly JSONL export of the product catalogue — one product object per line, 1,400 lines. A naive loader concatenates the file and chunks it every 1,000 characters, slicing straight through the middle of a product object so "overdraft" and its fee land in different chunks. A customer asks about overdraft fees and gets a fragment that mentions overdrafts but not the number. The fix is boring and total: one line = one object = one chunk, each rendered as labelled "path: value" text. Now every product answers on its own.</p>
@@ -5992,6 +6051,14 @@ for r in rows[1:]:                                 <span class="cmt"># iterate t
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>[sheet=Q3 Fees] Product: Overdraft | Fees $: 13400 | Txns: 512</code><br><code>[sheet=Q3 Fees] Product: Wire transfer | Fees $: 8900 | Txns: 140</code></p></div>
 
+<p><strong>How to chunk this.</strong> If the rows are narrative, make one chunk per row (or per logical group) as "Column: value" text. If the sheet is for aggregation or analytics, <em>don't chunk it</em> — route the question to the SQL / query engine (see Path B in Databases &amp; APIs).</p>
+<pre><code>from langchain_core.documents import Document
+
+docs = [Document(page_content=" | ".join(f"{h}: {v}" for h, v in zip(header, r)),  <span class="cmt"># one row = one chunk</span>
+                 metadata={"source": "fee_income.xlsx", "section": "Q3 Fees"})
+        for r in rows[1:]]                           <span class="cmt"># header/rows from the sheet read above</span>
+</code></pre>
+
 <h4>When to NOT use vector search at all</h4>
 <p>Vector search cannot do arithmetic. If a manager asks <em>"What was total fee income in Q3?"</em>, no amount of similarity search will <em>add up</em> the rows — it'll just fetch a few that look relevant. For aggregate and numeric questions, route the query to a <strong>query engine</strong> instead: generate SQL (Text-to-SQL) or a pandas operation over the structured table and compute the real answer. Reserve RAG for "what does this column mean?" questions over the data dictionary.</p>
 
@@ -6055,9 +6122,10 @@ for r in rows[1:]:                                 <span class="cmt"># iterate t
   <li>Grab embedded tables and images; a diagram-of-text with no caption is otherwise lost.</li>
 </ul>
 
-<pre><code>from docx import Document                           <span class="cmt"># python-docx reads .docx files</span>
+<pre><code>from docx import Document as DocxDocument           <span class="cmt"># python-docx reads .docx files</span>
+from langchain_core.documents import Document       <span class="cmt"># the pipeline's chunk type</span>
 
-paragraphs = Document("credit_policy.docx").paragraphs  <span class="cmt"># load the policy manual, in reading order</span>
+paragraphs = DocxDocument("credit_policy.docx").paragraphs  <span class="cmt"># load the policy manual, in reading order</span>
 section_path, chunks = [], []                       <span class="cmt"># track current heading path + collected chunks</span>
 
 for p in paragraphs:                                <span class="cmt"># paragraphs come in reading order</span>
@@ -6067,12 +6135,11 @@ for p in paragraphs:                                <span class="cmt"># paragrap
         section_path = section_path[: level - 1]     <span class="cmt"># trim deeper levels when we step back up</span>
         section_path.append(p.text)                  <span class="cmt"># push this heading onto the path</span>
     elif p.text.strip():                            <span class="cmt"># a non-empty body paragraph</span>
-        chunks.append({                             <span class="cmt"># store text WITH its heading breadcrumb</span>
-            "text": p.text,
-            "section_path": " &gt; ".join(section_path), <span class="cmt"># e.g. "Credit Policy &gt; 4 Collateral &gt; 4.2 Valuation"</span>
-        })
+        chunks.append(Document(page_content=p.text, metadata={   <span class="cmt"># one Document per body paragraph</span>
+            "source": "credit_policy.docx",
+            "section": " &gt; ".join(section_path)}))   <span class="cmt"># e.g. "Credit Policy &gt; 4 Collateral &gt; 4.2 Valuation"</span>
 
-print(chunks[0]["section_path"])                    <span class="cmt"># confirm the breadcrumb was captured</span>
+print(chunks[0].metadata["section"])                <span class="cmt"># confirm the breadcrumb was captured</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>Credit Policy &gt; 4 Collateral &gt; 4.2 Valuation</code></p></div>
 
@@ -6099,22 +6166,29 @@ print(f"{len(blobs)} embedded image(s) found; caption: {caption}")
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>1 embedded image(s) found; caption: Line chart: collateral valuation index up 3.1% across 2026.</code></p></div>
 
+<p><strong>How to chunk this.</strong> Split on the heading structure into one chunk per section, then size-split any oversized section; the heading path is the <code>section</code> (the loader above already emits one <code>Document</code> per paragraph with its breadcrumb).</p>
+<pre><code>from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(chunk_size=500, chunk_overlap=80)
+section_chunks = splitter.split_documents(chunks)    <span class="cmt"># chunks = the per-section Documents built above</span>
+</code></pre>
+
 <p>PowerPoint hides its best content in the <strong>speaker notes</strong> — the bullets say "Early repayment," the notes say what it actually costs. Here's how to pull slide text and notes together with <code>python-pptx</code>:</p>
 
 <pre><code>from pptx import Presentation                       <span class="cmt"># python-pptx reads .pptx decks</span>
+from langchain_core.documents import Document       <span class="cmt"># the pipeline's chunk type</span>
 
 slides = Presentation("mortgage_training.pptx").slides  <span class="cmt"># load the training deck</span>
+chunks = []
 for i, slide in enumerate(slides, start=1):         <span class="cmt"># one slide is a sensible chunk; keep its number</span>
     body = [sh.text for sh in slide.shapes if sh.has_text_frame]  <span class="cmt"># every text box on the slide</span>
     notes = ""                                      <span class="cmt"># default: no notes</span>
     if slide.has_notes_slide:                        <span class="cmt"># guard — not every slide has notes</span>
         notes = slide.notes_slide.notes_text_frame.text  <span class="cmt"># the hidden explanation presenters read aloud</span>
-    chunk = {                                        <span class="cmt"># one self-contained chunk per slide</span>
-        "slide": i,                                 <span class="cmt"># citation: "slide 7"</span>
-        "text": "\n".join(body),                    <span class="cmt"># the visible bullets</span>
-        "notes": notes,                             <span class="cmt"># KEEP notes — often the real content</span>
-    }
-    print(f"slide {i}: {len(chunk['notes'])} chars of notes")  <span class="cmt"># confirm notes were captured</span>
+    chunks.append(Document(page_content="\n".join(body),  <span class="cmt"># the visible bullets are the body</span>
+        metadata={"source": "mortgage_training.pptx", "page": i,  <span class="cmt"># page = slide number for the citation</span>
+                  "notes": notes}))                 <span class="cmt"># KEEP notes — often the real content</span>
+    print(f"slide {i}: {len(chunks[-1].metadata['notes'])} chars of notes")  <span class="cmt"># confirm notes were captured</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>slide 1: 0 chars of notes</code><br><code>slide 2: 0 chars of notes</code><br><code>slide 3: 0 chars of notes</code><br><code>slide 4: 0 chars of notes</code><br><code>slide 5: 0 chars of notes</code><br><code>slide 6: 0 chars of notes</code><br><code>slide 7: 240 chars of notes</code></p></div>
 
@@ -6140,6 +6214,14 @@ def caption(blob):                                   <span class="cmt"># same gp
 print(f"{len(pics)} slide image(s); first caption: {caption(pics[0])}")
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>2 slide image(s); first caption: Chart: fixed mortgage rate trend 2024-2026, rising to 6.9%.</code></p></div>
+
+<p><strong>How to chunk this.</strong> One chunk per slide — title, body and speaker notes together — with <code>page</code> set to the slide number (the loader above already does this).</p>
+<pre><code>from langchain_core.documents import Document
+
+deck = [Document(page_content=f"{d.page_content}\n\nNotes: {d.metadata['notes']}",  <span class="cmt"># bullets + notes as one chunk</span>
+                 metadata={"source": d.metadata["source"], "page": d.metadata["page"]})
+        for d in chunks]                             <span class="cmt"># chunks = the per-slide Documents built above</span>
+</code></pre>
 
 <h4>Going deeper — tracked changes, comments and the "which version is true?" problem</h4>
 <p>Office files carry history that a plain text dump quietly flattens. In Word, <strong>tracked changes</strong> mean the file holds both the old and the proposed wording; python-docx by default reads the <em>current</em> text, but a document mid-review can mix accepted and pending edits, so you must decide on purpose whether redlines are the live policy or stale suggestions. <strong>Comments</strong> ("legal to confirm this clause") are reviewer chatter, not policy — usually drop them, but keep them if the use case is reviewing the review. And every Office file has <strong>core properties</strong> (author, last-modified, title) worth capturing as metadata for freshness and provenance. The guiding rule: these formats know their own structure, so your job is to <em>preserve</em> it as boundaries and metadata, not to melt it into one blob.</p>
@@ -6202,6 +6284,15 @@ print(content[:70])                                 <span class="cmt"># confirm 
 <div class="out"><div class="lbl">▶ Output</div><p><code>Overdraft fees | An arranged overdraft costs $0; unarranged is $5/day</code></p></div>
 
 <p>One call did the heavy lifting: <code>trafilatura.extract</code> found the article and left the navigation behind, while <code>with_metadata=True</code> kept the URL and date so answers stay citable and fresh.</p>
+
+<p><strong>How to chunk this.</strong> After stripping chrome, split by heading with <code>HTMLHeaderTextSplitter</code> (<code>&lt;h1&gt;</code>—<code>&lt;h6&gt;</code>); the heading path is the <code>section</code> and the canonical URL is the <code>source</code>.</p>
+<pre><code>from langchain_text_splitters import HTMLHeaderTextSplitter
+
+splitter = HTMLHeaderTextSplitter(headers_to_split_on=[("h1", "h1"), ("h2", "h2"), ("h3", "h3")])
+docs = splitter.split_text(content)                  <span class="cmt"># content = the cleaned main-article HTML from above</span>
+for d in docs:                                        <span class="cmt"># stamp the canonical URL as the source</span>
+    d.metadata["source"] = "https://bank.example/help/overdraft-fees"
+</code></pre>
 
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
@@ -6295,6 +6386,16 @@ print(f"camt.053 statement for IBAN {iban}")        <span class="cmt"># render a
 
 <p>Two lessons sit in this snippet. First, the namespace dictionary <code>ns</code> — without it, <code>find</code> can't locate elements, because ISO 20022 tags are namespaced. Second, and more important, importing from <code>defusedxml</code> instead of the standard library is the entire XXE defence: same code, safe by construction.</p>
 
+<p><strong>How to chunk this.</strong> One chunk per logical <em>record</em> — a camt.053 entry, a <code>&lt;transaction&gt;</code> — never the whole file; lift the element's key fields into metadata.</p>
+<pre><code>from langchain_core.documents import Document
+
+docs = [Document(                                     <span class="cmt"># one Document per statement entry</span>
+    page_content=e.findtext("c:Amt", namespaces=ns),
+    metadata={"source": "camt053_2026-11-12.xml", "source_id": e.findtext("c:NtryRef", namespaces=ns),
+              "section": "camt.053.001.08"})
+    for e in root.findall(".//c:Ntry", ns)]          <span class="cmt"># iterate the entry elements</span>
+</code></pre>
+
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
   <p>A partner bank sends BankAssist a daily <code>camt.053</code> statement feed as XML. Because the pipeline parses by the ISO 20022 schema, each <code>&lt;Ntry&gt;</code> becomes a labelled transaction — amount, currency, booking date, counterparty — and the namespace version rides along as metadata, so a later camt.053.001.09 upgrade doesn't silently misread the old files. One day a crafted file arrives with an external-entity trick pointing at an internal config server. Because the parser is <code>defusedxml</code>, the entity is refused, not fetched — the attack is a non-event. Had the pipeline used the stdlib parser, that one file could have exfiltrated internal data. Same XML, two very different outcomes.</p>
@@ -6381,6 +6482,14 @@ print(meta["subject"])                             <span class="cmt"># confirm h
 
 <p>For Outlook's <strong>.msg</strong> files the standard library won't help; use the <code>extract-msg</code> library, which exposes the same pieces (sender, subject, body, attachments). After parsing, the crucial clean-up step is stripping the quoted "On Tuesday, X wrote:" history so each message is stored once, not re-embedded in every reply.</p>
 
+<p><strong>How to chunk this.</strong> One chunk per <em>message</em> in the thread — split the quoted history first — with the headers carried as metadata.</p>
+<pre><code>from langchain_core.documents import Document
+
+docs = [Document(page_content=text, metadata={       <span class="cmt"># one message = one chunk (quotes stripped)</span>
+    "source": "dispute_thread.eml", "source_id": msg["message-id"],
+    "from": msg["from"], "to": msg["to"], "date": msg["date"], "subject": msg["subject"]})]
+</code></pre>
+
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
   <p>A customer disputes a $35 charge over a five-email back-and-forth with support. The final reply quotes the entire thread beneath it, so the original "I don't recognise this charge" sentence physically appears in all five messages. Index each message whole and that one complaint gets embedded five times — it now dominates retrieval, crowding out the agent's actual resolution. After splitting the thread and stripping quoted history, each message is stored once: the complaint appears once, the resolution appears once, and a later query "how was the $35 dispute resolved?" surfaces the right message instead of five echoes of the question.</p>
@@ -6441,6 +6550,15 @@ for r in rows:                                     <span class="cmt"># render ea
     print(line)                                     <span class="cmt"># this sentence is what gets embedded + indexed</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>Product Everyday Current (id C1): monthly fee $0</code><br><code>Product Premier Current (id C7): monthly fee $12</code></p></div>
+
+<p><strong>How to chunk this.</strong> One row becomes one <code>Document</code> via a text template (Path A). Volatile rows — balances, live rates — are <em>not</em> ingested; query them live at question time (Path B below).</p>
+<pre><code>from langchain_core.documents import Document
+
+docs = [Document(                                     <span class="cmt"># one slow-changing row = one Document</span>
+    page_content=f"Product {r['name']} (id {r['product_id']}): monthly fee ${r['monthly_fee']}",
+    metadata={"source": "corebank.products", "source_id": r["product_id"]})
+    for r in rows]                                   <span class="cmt"># rows from the read-only query above</span>
+</code></pre>
 
 <h4>Path B — questions into SQL (query the volatile parts live)</h4>
 <p>For data that changes <em>fast</em> — a balance, a pending transaction, a live rate — <strong>never</strong> embed it. A balance embedded last Tuesday will be quoted as fact next month, and a wrong balance is a serious incident. Instead, let the assistant call the live system at the moment of the question: translate the user's words into a parameterised query or API call (<strong>Text-to-SQL</strong> or a tool call), run it against the system-of-record, and use the fresh result.</p>
@@ -6906,17 +7024,20 @@ manual = (
 )
 
 splitter = MarkdownHeaderTextSplitter(        <span class="cmt"># configure which heading levels to split on</span>
-    headers_to_split_on=[("#", "h1"), ("##", "h2")],  <span class="cmt"># treat '#' and '##' as cut points; store them under these labels</span>
+    headers_to_split_on=[("#", "h1"), ("##", "h2")],  <span class="cmt"># treat '#' and '##' as cut points; capture each level</span>
 )
 
-for doc in splitter.split_text(manual):       <span class="cmt"># returns Document objects (text + metadata), not plain strings</span>
-    print(doc.metadata, "->", doc.page_content)  <span class="cmt"># metadata carries the heading path; page_content is the section body</span>
+for doc in splitter.split_text(manual):       <span class="cmt"># returns Document objects (.page_content + .metadata), not plain strings</span>
+    levels = [doc.metadata[h] for h in ("h1", "h2") if h in doc.metadata]  <span class="cmt"># the headings above this chunk</span>
+    doc.metadata["section"] = " > ".join(levels)  <span class="cmt"># canonical heading path: citation + filter + context boost</span>
+    doc.metadata["source"] = "loan_policy.md"     <span class="cmt"># canonical origin, for the citation shown to the user</span>
+    print(doc.metadata["section"], "->", doc.page_content)  <span class="cmt"># the section path, then the section body</span>
 </code></pre>
 
 <div class="out">
   <div class="lbl">▶ Output</div>
-<pre><code>{'h1': 'Loan Policy', 'h2': 'Eligibility'} -> Applicant must be 18 or older.
-{'h1': 'Loan Policy', 'h2': 'Collateral'} -> Secured loans require collateral worth 120% of the amount.
+<pre><code>Loan Policy > Eligibility -> Applicant must be 18 or older.
+Loan Policy > Collateral -> Secured loans require collateral worth 120% of the amount.
 </code></pre>
 </div>
 
@@ -6933,17 +7054,20 @@ page = (
 )
 
 splitter = HTMLHeaderTextSplitter(            <span class="cmt"># choose which tags act as section boundaries</span>
-    headers_to_split_on=[("h1", "title"), ("h2", "section")],  <span class="cmt"># split on h1 and h2; label them 'title' and 'section'</span>
+    headers_to_split_on=[("h1", "h1"), ("h2", "h2")],  <span class="cmt"># split on h1 and h2; capture each level</span>
 )
 
-for doc in splitter.split_text(page):         <span class="cmt"># returns Documents, each tagged with its heading path</span>
-    print(doc.metadata, "->", doc.page_content)  <span class="cmt"># show the section label and its text</span>
+for doc in splitter.split_text(page):         <span class="cmt"># returns Documents (.page_content + .metadata), each tagged with its headings</span>
+    levels = [doc.metadata[h] for h in ("h1", "h2") if h in doc.metadata]  <span class="cmt"># the headings above this chunk</span>
+    doc.metadata["section"] = " > ".join(levels)  <span class="cmt"># canonical heading path, the same field used everywhere</span>
+    doc.metadata["source"] = "https://help.bank.example/card-disputes"  <span class="cmt"># canonical origin, for the citation</span>
+    print(doc.metadata["section"], "->", doc.page_content)  <span class="cmt"># the section path, then the section body</span>
 </code></pre>
 
 <div class="out">
   <div class="lbl">▶ Output</div>
-<pre><code>{'title': 'Card Disputes', 'section': 'How to file'} -> Call us within 60 days.
-{'title': 'Card Disputes', 'section': 'Provisional credit'} -> Credit posts in 10 days.
+<pre><code>Card Disputes > How to file -> Call us within 60 days.
+Card Disputes > Provisional credit -> Credit posts in 10 days.
 </code></pre>
 </div>
 
@@ -7120,8 +7244,33 @@ for i, c in enumerate(chunker.split_text(text)):  <span class="cmt"># split the 
 
 <div class="tipbox">
   <div class="lbl">✅ One size needn't fit both</div>
-  <p>Before reaching for any clever chunker, know this: the chunk you <em>search</em> and the chunk you <em>show the model</em> don't have to be the same size. You can index small, sharp child chunks for precise matching, then hand the model the larger parent passage around the hit so it has the full context. That is <strong>parent-child (small-to-big) retrieval</strong>, and it often beats a fancy chunker because it cures the real problem — "found the right sentence, lacked the surrounding context." It's a <em>retrieval</em> move rather than a chunking one, so it's covered in full in the Retrieval chapter; keep it in mind here, because it changes how small you can safely cut.</p>
+  <p>Before reaching for any clever chunker, know this: the chunk you <em>search</em> and the chunk you <em>show the model</em> don't have to be the same size. You can index small, sharp child chunks for precise matching, then hand the model the larger parent passage around the hit so it has the full context. That is <strong>parent-child (small-to-big) retrieval</strong>, and its close cousin <strong>sentence-window retrieval</strong> (index one sentence, return that sentence plus its neighbours) does the same trick at finer grain. Both often beat a fancy chunker because they cure the real problem — "found the right sentence, lacked the surrounding context." They are <em>retrieval</em> moves rather than chunking ones, so they're covered in full in the Retrieval chapter; keep them in mind here, because they change how small you can safely cut.</p>
 </div>
+
+<h4>Parent-child chunking — build both levels</h4>
+<p>The <em>chunking</em> side of small-to-big is simple: split each document twice. A <strong>parent</strong> pass makes big, context-rich sections; a <strong>child</strong> pass cuts each parent into small, sharp pieces. You <strong>embed the children</strong> (small vectors match precisely) but keep each child tied to its parent, so at query time you return the parent's fuller text to the model. The parents live in a plain key-value store, and each child carries only its <code>parent_id</code>:</p>
+
+<pre><code>from langchain_core.documents import Document              <span class="cmt"># LangChain's standard doc object: .page_content + .metadata</span>
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+parent_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(chunk_size=1500, chunk_overlap=0)   <span class="cmt"># big context sections</span>
+child_splitter  = RecursiveCharacterTextSplitter.from_tiktoken_encoder(chunk_size=250,  chunk_overlap=40)   <span class="cmt"># small, sharp matches</span>
+
+parent_store, children = {}, []                     <span class="cmt"># parents by id; child Documents to embed + index</span>
+for doc in documents:                               <span class="cmt"># documents: list[Document], each with .page_content + .metadata['source']</span>
+    for p, parent in enumerate(parent_splitter.split_documents([doc])):   <span class="cmt"># split_documents carries metadata through</span>
+        pid = f"{parent.metadata['source']}:p{p}"   <span class="cmt"># stable id linking a child back to its parent</span>
+        parent_store[pid] = parent.page_content      <span class="cmt"># keep the big passage to RETURN later</span>
+        for child in child_splitter.split_documents([parent]):
+            child.metadata["parent_id"] = pid        <span class="cmt"># tag each child Document with its parent</span>
+            children.append(child)                   <span class="cmt"># EMBED these child Documents for sharp matching</span>
+
+print(f"{len(children)} child Documents indexed; {len(parent_store)} parents kept for context")
+<span class="cmt"># query time: match a child vector -> read child.metadata['parent_id'] -> give the model parent_store[parent_id]</span>
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>1184 child Documents indexed; 213 parents kept for context</code></p></div>
+
+<p>That is the whole production of the two levels. LangChain's <code>ParentDocumentRetriever</code> wires the retrieval half for you (match child, return parent) — shown in full in the Retrieval chapter — but seeing the two splitters here makes the idea concrete: the child size controls <em>aim</em>, the parent size controls <em>completeness</em>, and the <code>parent_id</code> is the thread between them.</p>
 
 <h4>Agentic chunking — let a language model decide the cuts</h4>
 <p>Instead of rules, you ask a language model to read the document and decide the boundaries itself — "group these sentences, they belong together; start a new chunk here; this heading is misplaced, move it." Because the model actually <em>understands</em> the content, the boundaries can be the best of all. But it's slow, it costs a model call for every stretch of text, and it's <strong>non-deterministic</strong> — run it twice and you may get different chunks. Practitioner estimates put it at roughly <strong>10–50 times</strong> the cost of simple splitting.</p>
@@ -7291,6 +7440,34 @@ print("chunks:", len(chunks), "| biggest:", max(len(c) for c in chunks))  <span 
 </div>
 
 <p>Now every chunk is at most 200 characters — nothing overflows, nothing is dropped. Whenever you have text that might lack clean separators (tables, logs, dense legalese), prefer the recursive splitter so no chunk can ever exceed your limit.</p>
+
+<p>But character size is not the <em>real</em> limit. The embedding model counts <strong>tokens</strong>, and dense content — code, tables, long numbers, non-English — packs far more tokens per character than prose. So a chunk comfortably under your character <code>chunk_size</code> can still blow past the model's token limit (<code>text-embedding-3-small</code> accepts <strong>8,191 tokens</strong>), and the overflow is dropped silently. The fallback every production pipeline needs is a <strong>token-limit guard right before embedding</strong>: count each chunk's real tokens and hard-split any that still exceed the model's limit — no matter how the chunk was produced.</p>
+
+<pre><code>import tiktoken
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+EMBED_LIMIT = 8191                                  <span class="cmt"># text-embedding-3-small's max input tokens</span>
+enc = tiktoken.get_encoding("cl100k_base")          <span class="cmt"># the tokenizer that model uses</span>
+
+fallback = RecursiveCharacterTextSplitter.from_tiktoken_encoder(   <span class="cmt"># a TOKEN-sized splitter...</span>
+    encoding_name="cl100k_base", chunk_size=EMBED_LIMIT - 200, chunk_overlap=0)  <span class="cmt"># ...with headroom</span>
+
+def fit_to_embed(chunks, limit=EMBED_LIMIT):        <span class="cmt"># chunks: list[Document]; guarantee each one fits the model</span>
+    safe, rescued = [], 0
+    for c in chunks:
+        if len(enc.encode(c.page_content)) &lt;= limit:  <span class="cmt"># count REAL tokens of the Document's text</span>
+            safe.append(c)                          <span class="cmt"># already fits — keep as-is</span>
+        else:
+            safe.extend(fallback.split_documents([c]))  <span class="cmt"># too big — hard-split, metadata carried over</span>
+            rescued += 1
+    print(f"{rescued} oversize chunk(s) hard-split; {len(safe)} chunks now &lt;= {limit} tokens")
+    return safe
+
+chunks = fit_to_embed(chunks)                       <span class="cmt"># run this JUST before embed(); nothing can overflow</span>
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>1 oversize chunk(s) hard-split; 44 chunks now &lt;= 8191 tokens</code></p></div>
+
+<p>This guard is cheap insurance: it runs in microseconds, and it is the difference between "a legal clause silently vanished from the index" and "every chunk is guaranteed searchable." Put it at the boundary between chunking and embedding and you never have to trust that an upstream splitter respected the token limit — you <em>enforce</em> it.</p>
 
 <h4>Gotcha 3 — the stripped table and the orphaned number</h4>
 <p>A third silent killer hits bank documents specifically: <strong>context that lived in a layout, not in words</strong>. A fee table makes perfect sense on the page — columns for "Account type," "Monthly fee," "Waiver." But when it's extracted to text and chunked, a chunk might read "Premier &nbsp; 0 &nbsp; $10,000 average balance" with the column headers stripped away three chunks earlier. The number "0" is now an orphan — the embedding has no idea it means "monthly fee." A customer asks "what's the Premier monthly fee?" and the chunk that holds the answer doesn't contain the words "monthly fee" at all, so it never ranks. This is the structure-loss cousin of the split-sentence problem, and it's rampant in statements, rate sheets, and disclosure tables.</p>
@@ -7661,16 +7838,21 @@ for text, v in zip(chunks, chunk_vecs):             <span class="cmt"># score ea
 <p><strong>The same thing, the way you'd ship it — let a vector store embed, index, and search for you:</strong></p>
 <pre><code>from langchain_openai import OpenAIEmbeddings      <span class="cmt"># real OpenAI embeddings, the production default</span>
 from langchain_chroma import Chroma                 <span class="cmt"># a real vector store</span>
+from langchain_core.documents import Document       <span class="cmt"># the chunk object that carries text + metadata</span>
 
 emb = OpenAIEmbeddings(model="text-embedding-3-small")   <span class="cmt"># 1536-dim vectors</span>
-texts = ["Overdraft item fee is $35; one waiver per 12 months.",   <span class="cmt"># the same two chunks</span>
-         "Mortgage rates start at 5.9% APR for a 30-year term."]
-store = Chroma.from_texts(texts, emb)              <span class="cmt"># embed + index in one call</span>
+docs = [                                            <span class="cmt"># each chunk is a Document with its metadata</span>
+    Document(page_content="Overdraft item fee is $35; one waiver per 12 months.",
+             metadata={"source": "fees.pdf", "section": "Overdrafts &gt; 2 Fees"}),      <span class="cmt"># should win</span>
+    Document(page_content="Mortgage rates start at 5.9% APR for a 30-year term.",
+             metadata={"source": "mortgages.pdf", "section": "Home Loans &gt; 1 Rates"}),  <span class="cmt"># unrelated</span>
+]
+store = Chroma.from_documents(docs, emb)            <span class="cmt"># embed + index in one call</span>
 
-hit = store.similarity_search("how much is the overdraft charge?", k=1)[0]  <span class="cmt"># nearest by meaning</span>
-print(hit.page_content)                           <span class="cmt"># the overdraft fee chunk — same winner</span>
+hit = store.similarity_search("how much is the overdraft charge?", k=1)[0]  <span class="cmt"># nearest by meaning, returns a Document</span>
+print(hit.page_content, "—", hit.metadata["source"])   <span class="cmt"># the fee chunk + its citation source</span>
 </code></pre>
-<div class="out"><div class="lbl">▶ Output</div>Overdraft item fee is $35; one waiver per 12 months.</div>
+<div class="out"><div class="lbl">▶ Output</div>Overdraft item fee is $35; one waiver per 12 months. — fees.pdf</div>
 <p>Same example, same winner: the first shows the mechanism — you embed, then compute cosine yourself; the second lets the vector store embed, index, and search in three lines, which is what you ship.</p>
 
 <div class="qa">
@@ -8134,11 +8316,15 @@ vec = client.embeddings.create(                    <span class="cmt"># the embed
 record = {                                        <span class="cmt"># one row we upsert into the vector database</span>
     "id": "doc_8842_chunk_3",                     <span class="cmt"># stable id so we can re-embed or delete this exact chunk later</span>
     "vector": vec,                                <span class="cmt"># the embedding itself</span>
-    "payload": {                                  <span class="cmt"># metadata travels with the vector</span>
+    "payload": {                                  <span class="cmt"># canonical metadata travels with the vector</span>
+        "source": "overdraft_policy.pdf",         <span class="cmt"># human-readable origin — for the citation</span>
+        "source_id": "doc_8842",                  <span class="cmt"># stable document id — for update / delete / reconcile</span>
+        "section": "Overdrafts &gt; 2 Fees",         <span class="cmt"># heading path — citation + metadata filter</span>
+        "acl": ["role:retail"],                   <span class="cmt"># audience allowed to see it — the retriever's security filter</span>
+        "version": "2026-03",                     <span class="cmt"># content version — freshness &amp; dedup</span>
         "embed_model": "text-embedding-3-small",  <span class="cmt"># WHICH model drew this point on the map</span>
-        "embed_version": "2024-01",               <span class="cmt"># and which version — vendors update models silently</span>
+        "embed_version": "2024-01",               <span class="cmt"># and which embedding version — vendors update models silently</span>
         "embed_dims": 1536,                       <span class="cmt"># the dimension count, so a mismatch is caught on read</span>
-        "source": "overdraft_policy.pdf",         <span class="cmt"># where the text came from, for citations and re-ingest</span>
     },
 }
 </code></pre>
@@ -8521,10 +8707,9 @@ record = {                                        <span class="cmt"># one row we
 hits = client.query_points(                       <span class="cmt"># run the vector search</span>
     collection_name="bank_docs",                  <span class="cmt"># the collection of stored chunk vectors</span>
     query=q_vec,                                   <span class="cmt"># the embedded user question</span>
-    query_filter={                                 <span class="cmt"># ACL + scope filter applied DURING search, not after</span>
+    query_filter={                                 <span class="cmt"># ACL filter applied DURING search, not after</span>
         "must": [                                  <span class="cmt"># every condition here must hold for a chunk to qualify</span>
-            {"key": "customer_id", "match": {"value": user.customer_id}},  <span class="cmt"># only THIS customer's data — the security boundary</span>
-            {"key": "sensitivity", "match": {"value": "standard"}},        <span class="cmt"># exclude docs above the user's clearance</span>
+            {"key": "acl", "match": {"any": user.acl_groups}},  <span class="cmt"># only chunks this user is allowed to see — the security boundary</span>
         ]
     },
     limit=5,                                       <span class="cmt"># top-K: keep the 5 best qualifying chunks</span>
@@ -8532,7 +8717,7 @@ hits = client.query_points(                       <span class="cmt"># run the ve
 ).points                                           <span class="cmt"># the final, authorized, trimmed result list</span>
 
 for h in hits:                                     <span class="cmt"># the model only ever sees these</span>
-    print(h.id, h.payload["text"])                 <span class="cmt"># other customers' chunks were never scored</span>
+    print(h.id, h.payload["text"])                 <span class="cmt"># chunks outside the user's ACL were never scored</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>c1 Your overdraft fee is $35.</div>
 <p>Notice the filter runs <em>as part of</em> the search: chunks belonging to other customers are never scored, never retrieved, never seen by the model. That's the difference between a filter and a security control.</p>
@@ -8895,7 +9080,7 @@ draft = Anthropic().messages.create(                             <span class="cm
 ).content[0].text                                                <span class="cmt"># the hypothetical paragraph — we search with THIS</span>
 
 hits = store.similarity_search(draft, k=5)                       <span class="cmt"># embeds the draft and retrieves by its vector</span>
-print("Top hit:", hits[0].metadata["title"])                    <span class="cmt"># the draft's shape lands us on the right clause</span>
+print("Top hit:", hits[0].metadata["section"])                  <span class="cmt"># the draft's shape lands us on the right clause</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>Top hit: Deposit Agreement §6.3 — Revoking a standing payment authorisation</div>
 
@@ -9792,6 +9977,7 @@ print(reorder_for_attention(ranked))      <span class="cmt"># put the gold where
 
 <pre><code><span class="cmt"># Agentic RAG: let the model decide when to call the search tool, in a loop.</span>
 import anthropic                         <span class="cmt"># official Anthropic SDK</span>
+from langchain_core.documents import Document   <span class="cmt"># the standard chunk type across the pipeline</span>
 client = anthropic.Anthropic()          <span class="cmt"># reads ANTHROPIC_API_KEY from the environment</span>
 
 tools = [{                              <span class="cmt"># describe the ONE retrieval tool the model may call</span>
@@ -9804,8 +9990,11 @@ tools = [{                              <span class="cmt"># describe the ONE ret
     },
 }]
 
-def run_search(query):                  <span class="cmt"># your real retriever (vector/hybrid search) goes here</span>
-    return "Overdraft item fee: $35; one courtesy waiver per 12 months."  <span class="cmt"># returned as the tool result</span>
+def run_search(query: str) -> list[Document]:   <span class="cmt"># your real retriever (vector/hybrid search) goes here</span>
+    return [Document(                   <span class="cmt"># retrieved chunks carry metadata for citation + filtering</span>
+        page_content="Overdraft item fee: $35; one courtesy waiver per 12 months.",
+        metadata={"source": "fees-schedule.pdf", "section": "Accounts &gt; Overdraft &gt; Fees", "acl": "retail"},
+    )]
 
 messages = [{"role": "user", "content": "What's the overdraft fee, and can it be waived?"}]  <span class="cmt"># the customer's turn</span>
 
@@ -9822,7 +10011,8 @@ while True:                             <span class="cmt"># the agent loop: keep
         break                          <span class="cmt"># leave the loop</span>
     for block in resp.content:          <span class="cmt"># find the tool call(s) the model requested</span>
         if block.type == "tool_use":   <span class="cmt"># this block is a request to run a tool</span>
-            result = run_search(block.input["query"])  <span class="cmt"># actually run the retriever</span>
+            docs = run_search(block.input["query"])  <span class="cmt"># retriever returns Documents</span>
+            result = "\n".join(f"{d.page_content}  [source: {d.metadata['source']}]" for d in docs)  <span class="cmt"># render with citation</span>
             messages.append({"role": "user", "content": [{  <span class="cmt"># hand the result back to the model</span>
                 "type": "tool_result",
                 "tool_use_id": block.id,   <span class="cmt"># link the result to the exact call it answers</span>
@@ -9841,20 +10031,24 @@ while True:                             <span class="cmt"># the agent loop: keep
 import anthropic, requests
 from qdrant_client import QdrantClient
 from openai import OpenAI
+from langchain_core.documents import Document
 
 claude = anthropic.Anthropic()          <span class="cmt"># reads ANTHROPIC_API_KEY</span>
 openai = OpenAI()                        <span class="cmt"># reads OPENAI_API_KEY, for query embeddings</span>
 qdrant = QdrantClient(url="http://localhost:6333")
 
-def look_up_account(account_id: str) -> str:        <span class="cmt"># live account lookup</span>
+def look_up_account(account_id: str) -> str:        <span class="cmt"># live account lookup (structured API, not a doc)</span>
     a = requests.get(f"https://core-banking.internal/accounts/{account_id}", timeout=5).json()
     return (f"{account_id}: overdraft fee ${a['overdraft_fee']} posted {a['fee_date']}; "
             f"closing balance ${a['closing_balance']}")
 
-def search_policy(query: str) -> str:               <span class="cmt"># vector search over policy docs</span>
+def search_policy(query: str) -> list[Document]:    <span class="cmt"># vector search over policy docs</span>
     vec = openai.embeddings.create(model="text-embedding-3-small", input=query).data[0].embedding
     hits = qdrant.search(collection_name="policy", query_vector=vec, limit=3)
-    return "; ".join(h.payload["text"] for h in hits)
+    return [Document(page_content=h.payload["text"],        <span class="cmt"># Qdrant payload (a dict) is the DB boundary</span>
+                     metadata={"source": h.payload["source"], "section": h.payload["section"],
+                               "acl": h.payload["acl"]})
+            for h in hits]
 
 TOOLS = {"look_up_account": look_up_account, "search_policy": search_policy}
 SOURCE = {"look_up_account": "the live account API", "search_policy": "the policy store"}
@@ -9866,6 +10060,11 @@ tool_specs = [
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}},
                       "required": ["query"]}},
 ]
+
+def render(out) -> str:                  <span class="cmt"># Documents → cited text the model can read; plain facts pass through</span>
+    if isinstance(out, list):
+        return "\n".join(f"{d.page_content}  [source: {d.metadata['source']}]" for d in out)
+    return out
 
 MAX_STEPS = 5                            <span class="cmt"># the step cap: never loop unbounded</span>
 messages = [{"role": "user", "content":
@@ -9883,11 +10082,11 @@ for hop in range(1, MAX_STEPS + 1):     <span class="cmt"># the agent loop, hard
     tool_results = []
     for b in resp.content:
         if b.type == "tool_use":        <span class="cmt"># run the tool the model chose, then feed the result back</span>
-            out = TOOLS[b.name](**b.input)
+            result = render(TOOLS[b.name](**b.input))
             arg = next(iter(b.input.values()))
             print(f'hop {hop} · decide → {reasoning} → call {b.name}("{arg}")   [routes to {SOURCE[b.name]}]')
-            print(f"        result → {out}")
-            tool_results.append({"type": "tool_result", "tool_use_id": b.id, "content": out})
+            print(f"        result → {result}")
+            tool_results.append({"type": "tool_result", "tool_use_id": b.id, "content": result})
     messages.append({"role": "user", "content": tool_results})
 </code></pre>
 
@@ -9920,7 +10119,10 @@ def agent(state: State) -> dict:        <span class="cmt"># NODE: the model deci
 def act(state: State) -> dict:          <span class="cmt"># NODE: run the tool calls the model requested</span>
     out = []
     for call in state["messages"][-1].tool_calls:
-        out.append(ToolMessage(TOOLS[call["name"]](**call["args"]), tool_call_id=call["id"]))
+        result = TOOLS[call["name"]](**call["args"])
+        content = ("\n".join(f"{d.page_content}  [source: {d.metadata['source']}]" for d in result)
+                   if isinstance(result, list) else result)   <span class="cmt"># Documents → cited text</span>
+        out.append(ToolMessage(content, tool_call_id=call["id"]))
     return {"messages": out}
 
 def route(state: State) -> str:         <span class="cmt"># CONDITIONAL EDGE: tools pending → act, else finish</span>
@@ -10168,14 +10370,15 @@ print(is_grounded(passages, good), is_grounded(passages, bad))  <span class="cmt
 
 <pre><code><span class="cmt"># CRAG relevance grader: score one retrieved doc against the question.</span>
 from openai import OpenAI
+from langchain_core.documents import Document
 import json, requests
 client = OpenAI()
 
-def grade(question: str, doc: str) -> str:    <span class="cmt"># "yes" (relevant) or "no" (not relevant)</span>
+def grade(question: str, doc: Document) -> str:    <span class="cmt"># "yes" (relevant) or "no" (not relevant)</span>
     prompt = (
         "Reply JSON only: {\"relevant\": \"yes\" or \"no\"}.\n"   <span class="cmt"># force a clean, parseable verdict</span>
         "Mark 'yes' only if the DOCUMENT helps answer the QUESTION.\n"
-        f"QUESTION: {question}\nDOCUMENT: {doc}"
+        f"QUESTION: {question}\nDOCUMENT: {doc.page_content}"
     )
     resp = client.chat.completions.create(
         model="gpt-4.1-mini",           <span class="cmt"># small + fast; grading must be cheap, we do it per doc</span>
@@ -10184,15 +10387,18 @@ def grade(question: str, doc: str) -> str:    <span class="cmt"># "yes" (relevan
     )
     return json.loads(resp.choices[0].message.content)["relevant"]  <span class="cmt"># "yes" or "no"</span>
 
-def web_search_fallback(question: str) -> list[str]:   <span class="cmt"># query your APPROVED store, never the open web</span>
+def web_search_fallback(question: str) -> list[Document]:   <span class="cmt"># query your APPROVED store, never the open web</span>
     r = requests.get("https://kb.internal/search", params={"q": question}, timeout=5)
     r.raise_for_status()
-    return [hit["text"] for hit in r.json()["results"]]
+    return [Document(page_content=hit["text"], metadata={"source": hit["source"], "acl": "retail"})
+            for hit in r.json()["results"]]
 
 q = "Can I waive the overdraft fee?"
-docs = [
-    "Overdraft item fee: $35; one courtesy waiver per 12 months.",   <span class="cmt"># on-topic</span>
-    "Our branch lobby hours are 9am to 4pm on weekdays.",            <span class="cmt"># off-topic distractor</span>
+docs = [                                 <span class="cmt"># the retrieved chunks, as LangChain Documents</span>
+    Document(page_content="Overdraft item fee: $35; one courtesy waiver per 12 months.",
+             metadata={"source": "fees-schedule.pdf", "section": "Accounts &gt; Overdraft &gt; Fees"}),  <span class="cmt"># on-topic</span>
+    Document(page_content="Our branch lobby hours are 9am to 4pm on weekdays.",
+             metadata={"source": "branch-info.pdf", "section": "Branches &gt; Hours"}),  <span class="cmt"># off-topic distractor</span>
 ]
 grades = [grade(q, d) for d in docs]    <span class="cmt"># grade every retrieved doc</span>
 keep = [d for d, g in zip(docs, grades) if g == "yes"]  <span class="cmt"># drop the junk before it reaches the model</span>
@@ -12143,7 +12349,7 @@ print(chain.invoke("How much is the overdraft fee, and can it be waived?"))
 
 <div class="qa">
   <div class="q">Q. "Build me the smallest RAG that actually works, out loud."</div>
-  <div class="a">A. Load the docs, split them into overlapping chunks, embed each chunk and put the vectors in a store — that is the one-time index. Then per question: embed the question, pull the few nearest chunks, paste them into the prompt with "answer only from this context," and generate. <strong>Strong answer adds:</strong> the one line that makes it trustworthy is "if it's not in the context, say you don't know," and the single biggest quality lever is <em>retrieval</em>, not the prompt — so the smallest useful next step is measuring retrieval hit rate, not adding frameworks.</p></div>
+  <div class="a">A. Load the docs, split them into overlapping chunks, embed each chunk and put the vectors in a store — that is the one-time index. Then per question: embed the question, pull the few nearest chunks, paste them into the prompt with "answer only from this context," and generate. <strong>Strong answer adds:</strong> the one line that makes it trustworthy is "if it's not in the context, say you don't know," and the single biggest quality lever is <em>retrieval</em>, not the prompt — so the smallest useful next step is measuring retrieval hit rate, not adding frameworks.</div>
 </div>
 
 <div class="remember">
@@ -12259,7 +12465,7 @@ print(reply if is_grounded(reply, chunks)
 
 <div class="qa">
   <div class="q">Q. "Walk me through a production RAG request at a bank, end to end."</div>
-  <div class="a">A. The question hits <em>ACL-filtered hybrid retrieval</em> — dense for meaning, BM25 for exact terms, filtered to the asker's audience in the retriever so forbidden chunks never even score. A <em>cross-encoder reranker</em> cuts the twenty candidates to the five most relevant. Generation answers <em>only</em> from those five and <em>cites</em> each fact. A <em>faithfulness gate</em> checks the answer against the context and blocks it if anything is unsupported, falling back to a human. <strong>Strong answer adds:</strong> access control lives at ingestion and in the retriever (never the prompt), the whole path is logged per-stage for audit, and you add each stage only after measuring the failure it fixes — the simple loop first, the production stages as earned.</p></div>
+  <div class="a">A. The question hits <em>ACL-filtered hybrid retrieval</em> — dense for meaning, BM25 for exact terms, filtered to the asker's audience in the retriever so forbidden chunks never even score. A <em>cross-encoder reranker</em> cuts the twenty candidates to the five most relevant. Generation answers <em>only</em> from those five and <em>cites</em> each fact. A <em>faithfulness gate</em> checks the answer against the context and blocks it if anything is unsupported, falling back to a human. <strong>Strong answer adds:</strong> access control lives at ingestion and in the retriever (never the prompt), the whole path is logged per-stage for audit, and you add each stage only after measuring the failure it fixes — the simple loop first, the production stages as earned.</div>
 </div>
 
 <div class="remember">
