@@ -11903,6 +11903,212 @@ def test_answer_quality(record):
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
+<h2 class="part">Knowledge Layer (RAG) — End-to-End, Start to Finish</h2>
+<p class="part-intro">You have met every part on its own: ingestion, chunking, embeddings, retrieval, agentic tricks, evaluation. This chapter bolts them into one running system — first the simplest RAG that works, then the production version you would actually ship at a bank. Two complete, real examples you can read top to bottom.</p>
+
+<section class="topic">
+<h3>The simplest RAG that works — end to end in one file</h3>
+<p class="lede">Strip RAG to its bones and the whole thing is about twenty lines: load, chunk, embed, store, then retrieve-ground-generate on every question.</p>
+
+<p>Before any of the clever parts, it helps to see the entire loop at its smallest. Three stages: <strong>ingest</strong> the documents once, <strong>index</strong> their meaning into a vector store, then <strong>answer</strong> each question by fetching the right chunks and letting the model write from them. Here it is as one real, runnable file — nothing hidden behind a helper.</p>
+
+<figure>
+  <svg viewBox="0 0 660 250" role="img" aria-label="End-to-end RAG: offline, documents are chunked, embedded and stored; online, a question is retrieved against the store, grounded, and generated into an answer">
+    <defs>
+      <marker id="g41-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">
+      <text x="120" y="24" fill="var(--muted)" font-size="11" font-weight="700">OFFLINE · once</text>
+      <rect x="14"  y="36" width="92" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="60" y="60" fill="var(--accent-ink)">Documents</text>
+      <rect x="128" y="36" width="92" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="174" y="60" fill="var(--accent-ink)">Chunk</text>
+      <rect x="242" y="36" width="92" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="288" y="60" fill="var(--accent-ink)">Embed</text>
+      <rect x="356" y="36" width="110" height="40" rx="9" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/><text x="411" y="55" fill="var(--accent-ink)">Vector store</text><text x="411" y="69" fill="var(--muted)" font-size="10" font-weight="500">the index</text>
+
+      <text x="120" y="150" fill="var(--muted)" font-size="11" font-weight="700">ONLINE · every question</text>
+      <rect x="14"  y="162" width="92" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="60" y="186" fill="var(--accent-ink)">Question</text>
+      <rect x="128" y="162" width="92" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="174" y="186" fill="var(--accent-ink)">Retrieve</text>
+      <rect x="242" y="162" width="92" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="288" y="186" fill="var(--accent-ink)">Generate</text>
+      <rect x="356" y="162" width="110" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="411" y="186" fill="var(--accent-ink)">Answer</text>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="1.9" marker-end="url(#g41-ar)">
+      <path d="M106 56 L126 56"/><path d="M220 56 L240 56"/><path d="M334 56 L354 56"/>
+      <path d="M106 182 L126 182"/><path d="M220 182 L240 182"/><path d="M334 182 L354 182"/>
+      <path d="M411 76 L411 160"/>
+    </g>
+  </svg>
+  <figcaption>The index is built once offline; the retrieve-generate path runs live on every question, reading from that index.</figcaption>
+</figure>
+
+<p>This version uses LangChain to keep the plumbing short, with real OpenAI embeddings and a real Chroma store:</p>
+
+<pre><code>from langchain_community.document_loaders import DirectoryLoader   <span class="cmt"># load files from a folder</span>
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_chroma import Chroma
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+
+<span class="cmt"># 1) INGEST — load the bank's policy docs and cut them into overlapping chunks</span>
+docs   = DirectoryLoader("bank_policies/", glob="**/*.md").load()
+chunks = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=120).split_documents(docs)
+
+<span class="cmt"># 2) INDEX — embed each chunk and store the vectors (done once, offline)</span>
+store     = Chroma.from_documents(chunks, OpenAIEmbeddings(model="text-embedding-3-small"))
+retriever = store.as_retriever(search_kwargs={"k": 4})     <span class="cmt"># fetch the 4 closest chunks</span>
+
+<span class="cmt"># 3) ANSWER — retrieve, ground, generate; this runs on every question</span>
+prompt = ChatPromptTemplate.from_template(
+    "Answer only from the context. If it is not there, say you don't know.\n\n"
+    "Context:\n{context}\n\nQuestion: {question}")
+
+chain = ({"context": retriever, "question": RunnablePassthrough()}   <span class="cmt"># question -> retrieved chunks</span>
+         | prompt                                                     <span class="cmt"># paste chunks above the question</span>
+         | ChatOpenAI(model="gpt-4.1-mini", temperature=0)            <span class="cmt"># write the grounded answer</span>
+         | StrOutputParser())
+
+print(chain.invoke("How much is the overdraft fee, and can it be waived?"))
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>The overdraft item fee is $35 per item. It can be waived once every 12 months as a courtesy, on request.</code></p></div>
+
+<div class="story">
+  <div class="lbl">🏦 Picture this</div>
+  <p>A new BankAssist engineer clones the repo on a Monday. By lunch they have pointed <code>bank_policies/</code> at the deposit-terms folder, run this file, and watched it answer the overdraft question from the real policy text. That is the whole value of RAG in one sitting: the model now answers from the bank's documents, not its training memory. Everything after this is making that same loop <em>accurate, fast, and safe</em> — not making it exist.</p>
+</div>
+
+<div class="key">
+  <div class="lbl">💡 Key idea</div>
+  <p>Every RAG system, however advanced, is still just these three stages: ingest once, index once, then retrieve-ground-generate per question. When a real system confuses you, find these three stages inside it and the rest is detail.</p>
+</div>
+
+<div class="qa">
+  <div class="q">Q. "Build me the smallest RAG that actually works, out loud."</div>
+  <div class="a">A. Load the docs, split them into overlapping chunks, embed each chunk and put the vectors in a store — that is the one-time index. Then per question: embed the question, pull the few nearest chunks, paste them into the prompt with "answer only from this context," and generate. <strong>Strong answer adds:</strong> the one line that makes it trustworthy is "if it's not in the context, say you don't know," and the single biggest quality lever is <em>retrieval</em>, not the prompt — so the smallest useful next step is measuring retrieval hit rate, not adding frameworks.</p></div>
+</div>
+
+<div class="remember">
+  <div class="lbl">🧠 Remember it</div>
+  <p>Ingest, index, answer. Twenty lines is a working RAG; the rest of this book is turning "working" into "trustworthy."</p>
+</div>
+</section>
+
+
+<section class="topic">
+<h3>Production RAG, end to end — the version you'd actually ship</h3>
+<p class="lede">The real system keeps the same three stages but adds the five things a bank cannot skip: metadata, access control, hybrid retrieval, reranking, and a grounding gate.</p>
+
+<p>The simple version answers, but it would get you fired at a bank: it has no idea <em>who</em> is allowed to see each chunk, it misses the exact-term matches that dense search alone fluffs, and it will happily serve a confident wrong answer. The production pipeline threads every technique from the earlier chapters through one path. Read it as four real functions — <strong>ingest</strong>, <strong>retrieve</strong>, <strong>answer</strong>, <strong>gate</strong> — each doing exactly one job.</p>
+
+<figure>
+  <svg viewBox="0 0 660 196" role="img" aria-label="Production RAG path: a question goes through ACL-filtered hybrid retrieval, a reranker, grounded generation with citations, and a faithfulness gate before the answer is served">
+    <defs>
+      <marker id="g41-ar2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" text-anchor="middle">
+      <rect x="10"  y="78" width="86" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="53" y="102" fill="var(--accent-ink)">Question</text>
+      <rect x="116" y="60" width="104" height="76" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="168" y="86" fill="var(--accent-ink)">Hybrid</text><text x="168" y="104" fill="var(--muted)" font-size="10" font-weight="500">dense + BM25</text><text x="168" y="120" fill="var(--muted)" font-size="10" font-weight="500">ACL-filtered</text>
+      <rect x="240" y="78" width="90" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="285" y="97" fill="var(--accent-ink)">Rerank</text><text x="285" y="111" fill="var(--muted)" font-size="10" font-weight="500">top 5</text>
+      <rect x="350" y="78" width="104" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="402" y="97" fill="var(--accent-ink)">Generate</text><text x="402" y="111" fill="var(--muted)" font-size="10" font-weight="500">+ citations</text>
+      <rect x="474" y="78" width="82" height="40" rx="10" fill="var(--surface)" stroke="var(--amber)" stroke-width="2"/><text x="515" y="97" fill="var(--accent-ink)">Gate</text><text x="515" y="111" fill="var(--muted)" font-size="10" font-weight="500">grounded?</text>
+      <rect x="576" y="78" width="74" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="613" y="102" fill="var(--accent-ink)">Serve</text>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="1.9" marker-end="url(#g41-ar2)">
+      <path d="M96 98 L114 98"/><path d="M220 98 L238 98"/><path d="M330 98 L348 98"/><path d="M454 98 L472 98"/><path d="M556 98 L574 98"/>
+    </g>
+  </svg>
+  <figcaption>Same retrieve-generate spine as the simple version, with access control, hybrid search, reranking and a grounding gate added at the points where a bank gets hurt.</figcaption>
+</figure>
+
+<p>Each document arrived from ingestion already tagged with <code>source</code>, <code>section</code> and <code>acl</code> (who may see it) — the labels the connectors and cleaning stages carried through. The pipeline uses them here:</p>
+
+<pre><code>import os, cohere
+from qdrant_client import QdrantClient
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_qdrant import QdrantVectorStore
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+emb = OpenAIEmbeddings(model="text-embedding-3-small")
+llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0)
+co  = cohere.ClientV2(os.environ["COHERE_API_KEY"])
+store = QdrantVectorStore(client=QdrantClient(os.environ["QDRANT_URL"]),
+                          collection_name="bankassist", embedding=emb)
+
+<span class="cmt"># 1) INGEST — chunk on real token counts; source/section/acl ride in each chunk's metadata</span>
+def ingest(docs):
+    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(chunk_size=500, chunk_overlap=80)
+    store.add_documents(splitter.split_documents(docs))      <span class="cmt"># embeds + upserts, ACL included</span>
+
+<span class="cmt"># 2) RETRIEVE — dense + keyword, filtered to the asker's audience, then reranked</span>
+def retrieve(question, bm25, audience, k=20, top_n=5):
+    dense  = store.as_retriever(search_kwargs={                <span class="cmt"># the ACL filter is enforced in the RETRIEVER,</span>
+        "k": k, "filter": {"must": [{"key": "acl", "match": {"any": audience}}]}})  <span class="cmt"># never in the prompt</span>
+    hybrid = EnsembleRetriever(retrievers=[dense, bm25], weights=[0.6, 0.4])
+    cands  = hybrid.invoke(question)                           <span class="cmt"># ~k results, found both ways</span>
+    ranked = co.rerank(model="rerank-v3.5", query=question,    <span class="cmt"># cross-encoder re-sorts for true relevance</span>
+                       documents=[c.page_content for c in cands], top_n=top_n)
+    return [cands[r.index] for r in ranked.results]           <span class="cmt"># the best few, best-first</span>
+
+<span class="cmt"># 3) ANSWER — ground strictly in the chunks, cite every fact</span>
+def answer(question, chunks):
+    context = "\n\n".join(f"[{c.metadata['source']} §{c.metadata['section']}] {c.page_content}"
+                          for c in chunks)
+    return llm.invoke(
+        "Answer ONLY from the context and cite each fact as [source §section]. "
+        "If the answer is not there, say you don't know.\n\n"
+        f"Context:\n{context}\n\nQuestion: {question}").content
+
+<span class="cmt"># 4) GATE — never serve an answer the context doesn't support</span>
+def is_grounded(reply, chunks):
+    ctx = " ".join(c.page_content for c in chunks)
+    verdict = llm.invoke("Is every claim in the ANSWER supported by the CONTEXT? Reply yes or no.\n\n"
+                         f"CONTEXT: {ctx}\n\nANSWER: {reply}").content.strip().lower()
+    return verdict.startswith("yes")
+
+<span class="cmt"># --- one customer question, all four stages ---</span>
+bm25   = BM25Retriever.from_documents(store.similarity_search("", k=5000))  <span class="cmt"># keyword index over the corpus</span>
+chunks = retrieve("Can my overdraft fee be waived?", bm25, audience=["all-staff", "mortgages-team"])
+reply  = answer("Can my overdraft fee be waived?", chunks)
+print(reply if is_grounded(reply, chunks)
+      else "I can't confirm that from our policies — connecting you to an agent.")
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>Yes. The overdraft item fee is $35 per item [Deposit Account Agreement §4.2], and one courtesy waiver is allowed every 12 months on request [Deposit Account Agreement §4.3].</code></p></div>
+
+<p>Trace one question through it. The <strong>ACL filter</strong> drops any chunk the asker may not see <em>before</em> scoring, so access control is a retrieval guarantee, not a polite request in the prompt. <strong>Hybrid</strong> search catches both the meaning ("waived") and the exact term ("courtesy waiver"). The <strong>reranker</strong> re-sorts twenty loose candidates down to the five that truly answer the question. Generation is forced to <strong>cite</strong>, so every claim is checkable. And the <strong>gate</strong> refuses to serve anything the chunks don't support — the difference between "mostly right" and "safe to put in front of a customer."</p>
+
+<div class="card">
+  <div class="lbl">⚙️ In production</div>
+  <p><strong>Cost &amp; latency.</strong> The online path now makes three model-ish calls (rerank, generate, gate) plus the vector search. Budget roughly 1–2 seconds end to end and a few cents per answer; the rerank and gate each add latency you pay for safety, so cache aggressively and skip the gate only for low-risk, read-only queries. The index build is the batch cost — pay it off-peak and re-ingest only deltas.</p>
+  <p><strong>Scale &amp; failure modes.</strong> The classic production failures are all visible here: a stale index (re-ingest on a schedule), an ACL that never made it into metadata (a leak — test it), a reranker starved of recall because <code>k</code> was set too low, and a gate so strict it refuses good answers. Instrument each stage separately so you can see which one slipped.</p>
+  <p><strong>Monitoring.</strong> Log, per answer: which chunks were retrieved, their ACL, the rerank scores, whether the gate passed, and the citations. When a customer reports a wrong answer, that trace tells you in seconds whether the fault was retrieval, generation, or a bad source document.</p>
+  <p><strong>Security &amp; compliance (a bank).</strong> The ACL filter is the control that keeps a teller from seeing a compliance-only memo, so treat it as a tested security boundary, not a feature. Keep the whole path inside the bank's trust boundary, and keep the citation trail — it is what lets you answer a regulator's "where did this come from, and when?"</p>
+</div>
+
+<div class="warn">
+  <div class="lbl">⚠ Watch out</div>
+  <p>Do not bolt these five additions on in a random order and hope. The one that bites first is <strong>access control</strong>: if the ACL isn't on the chunk at ingestion and enforced in the retriever, no amount of reranking or prompting makes the system safe — you have simply built a faster leak. Get metadata and ACLs right at ingestion, then add hybrid, rerank and the gate.</p>
+</div>
+
+<div class="tipbox">
+  <div class="lbl">✅ When to use / when not</div>
+  <p><strong>Use</strong> the full pipeline whenever answers must be accurate, access-controlled and auditable — which at a bank is almost always. <strong>Start simpler</strong> when you're still proving the idea: ship the twenty-line version against a real question set, measure retrieval hit rate and faithfulness, and add each production stage only to fix a failure you have actually measured. Every stage you add is latency, cost and a thing that can break — earn it.</p>
+</div>
+
+<div class="qa">
+  <div class="q">Q. "Walk me through a production RAG request at a bank, end to end."</div>
+  <div class="a">A. The question hits <em>ACL-filtered hybrid retrieval</em> — dense for meaning, BM25 for exact terms, filtered to the asker's audience in the retriever so forbidden chunks never even score. A <em>cross-encoder reranker</em> cuts the twenty candidates to the five most relevant. Generation answers <em>only</em> from those five and <em>cites</em> each fact. A <em>faithfulness gate</em> checks the answer against the context and blocks it if anything is unsupported, falling back to a human. <strong>Strong answer adds:</strong> access control lives at ingestion and in the retriever (never the prompt), the whole path is logged per-stage for audit, and you add each stage only after measuring the failure it fixes — the simple loop first, the production stages as earned.</p></div>
+</div>
+
+<div class="remember">
+  <div class="lbl">🧠 Remember it</div>
+  <p>Same three stages, five bank-grade additions: <strong>metadata, ACLs, hybrid, rerank, gate</strong>. Ingest it right, filter who sees it, find it two ways, re-sort it, and never serve what the context can't back up.</p>
+</div>
+</section>
 <h2 class="part">AI Agents — The agent loop &amp; when to use one</h2>
 <p class="part-intro">Let's meet the AI that doesn't just answer — it decides what to do next, takes an action, looks at the result, and keeps going until the job is done. We'll build the idea slowly, in plain words, with our bank "BankAssist" as the running example.</p>
 
