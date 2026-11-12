@@ -5590,6 +5590,78 @@ print(f"assembled {len(blocks)} clean blocks")
 
 <p>The router is the whole idea: <code>classify()</code> reads two cheap signals — is there a text layer, are there images — and each page flows to the right handler: PyMuPDF for text, pdfplumber for tables, a gpt-4.1 vision caption for figures, pytesseract for scans. Gate the expensive ones by cost exactly as the tiered parser in the next topic does.</p>
 
+<h4>When one page has text, a table AND a figure — go block-level</h4>
+<p>The router above makes a coarse choice: it sends each <em>whole page</em> to one handler. That is fine when pages are homogeneous, but a real policy page often carries a paragraph, a rates table, and a chart all at once — and page-level routing would keep one and silently drop the other two. The fix is to stop classifying the page and instead <strong>pull every block out with its position on the page</strong>, render each block by its own type, and stitch them back together <strong>in reading order</strong>. PyMuPDF gives you exactly this: <code>page.find_tables()</code> returns each table with its bounding box, and <code>page.get_text("dict")</code> returns every text and image block with its box too.</p>
+
+<pre><code>import pymupdf                                      <span class="cmt"># caption_image() is the real gpt-4.1 vision caption from the Figures section</span>
+
+def center_in(bbox, rects):                        <span class="cmt"># does this block sit inside any table's box?</span>
+    x0, y0, x1, y1 = bbox
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    return any(rx0 &lt;= cx &lt;= rx1 and ry0 &lt;= cy &lt;= ry1 for rx0, ry0, rx1, ry1 in rects)
+
+def parse_mixed_page(page):                         <span class="cmt"># ONE page -> every block, in reading order</span>
+    found = page.find_tables()                      <span class="cmt"># PyMuPDF's table finder, with bounding boxes</span>
+    table_rects = [t.bbox for t in found.tables]
+    items = []                                      <span class="cmt"># (y, x, kind, rendered-text) per block</span>
+
+    for t in found.tables:                          <span class="cmt"># 1) each table -> markdown, at its y/x on the page</span>
+        x0, y0, x1, y1 = t.bbox
+        items.append((y0, x0, "table", t.to_markdown()))
+
+    for b in page.get_text("dict")["blocks"]:       <span class="cmt"># 2) text + image blocks, each with its box</span>
+        if center_in(b["bbox"], table_rects):       <span class="cmt"># skip text that is already inside a captured table</span>
+            continue
+        x0, y0, x1, y1 = b["bbox"]
+        if b["type"] == 0:                          <span class="cmt"># a text block</span>
+            txt = "".join(s["text"] for line in b["lines"] for s in line["spans"]).strip()
+            if txt:
+                items.append((y0, x0, "text", txt))
+        elif b["type"] == 1:                        <span class="cmt"># an image block -> caption it, keep its place</span>
+            items.append((y0, x0, "figure", "[FIGURE] " + caption_image(b["image"])))
+
+    items.sort(key=lambda it: (round(it[0]), round(it[1])))   <span class="cmt"># reading order: top->bottom, then left->right</span>
+    return "\n\n".join(body if kind == "text" else f"{kind.upper()}: {body}"
+                       for _, _, kind, body in items)
+
+print(parse_mixed_page(pymupdf.open("home_loan_terms_2026.pdf")[1]))   <span class="cmt"># page 2: prose + table + chart</span>
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>Fixed-rate options for a 2026 home loan are shown below.<br><br>TABLE: | Term | Rate |<br>| 15-year | 6.2% |<br>| 30-year | 6.9% |<br><br>FIGURE: Line chart: fixed rate rising from 6.2% at 15 years to 6.9% at 30 years.</code></p></div>
+
+<p>Three things make this work. The table's <strong>bounding box</strong> lets you drop the loose text blocks that fall inside it, so the numbers aren't captured twice (once as a table, once as scrambled prose). Sorting by <strong>(y, x)</strong> rebuilds reading order, so the paragraph, the table and the caption come out in the order a human reads them. And each block keeps its <strong>type</strong>, so you can chunk sensibly later — a rule worth stating now: <strong>keep a table as one chunk</strong> (never split it across a chunk boundary), and keep a figure's caption next to the text that refers to it. When you do reach for a cloud service, this block-and-reading-order assembly is exactly what <strong>Azure AI Document Intelligence</strong>'s <code>prebuilt-layout</code> returns for you — text, tables and selection marks already ordered — which is a large part of why mixed-layout pages are where it earns its cost.</p>
+
+<h4>Do you need all these libraries, or can one do it all?</h4>
+<p>You do <em>not</em> need to wire together five libraries by hand. The examples above use separate tools to show the mechanics, but in practice you choose one of two strategies.</p>
+
+<p><strong>Strategy A — one all-in-one tool.</strong> A single library (or service) handles text, tables, images and reading order in one call:</p>
+<ul>
+  <li><strong>Unstructured</strong> (on-prem, open source) — <code>partition_pdf(..., strategy="hi_res")</code> returns typed elements (Title, NarrativeText, Table, Image) with layout and optional OCR built in. One call, many formats.</li>
+  <li><strong>Docling</strong> (on-prem, open source) — converts a whole document to structured Markdown/JSON with tables and reading order.</li>
+  <li><strong>Azure AI Document Intelligence</strong> / AWS Textract / Google Document AI (cloud) — one API returns text, tables, key-value pairs and handwriting, and handles scans too. The simplest "it just works," at per-page cost and with the compliance checks from the landscape topic.</li>
+</ul>
+
+<pre><code>from unstructured.partition.pdf import partition_pdf   <span class="cmt"># ONE library: text + tables + images + layout</span>
+
+elements = partition_pdf(
+    "home_loan_terms_2026.pdf",
+    strategy="hi_res",                                 <span class="cmt"># layout model; also OCRs scanned pages</span>
+    infer_table_structure=True,                        <span class="cmt"># tables come back as structured HTML</span>
+    extract_image_block_types=["Image", "Table"])      <span class="cmt"># pull figures/charts out as images too</span>
+
+for el in elements:                                    <span class="cmt"># one typed stream, already in reading order</span>
+    print(f"{type(el).__name__:14} {str(el)[:44]}")
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>Title          Home Loan Terms 2026<br>NarrativeText  Fixed-rate options for a 2026 home loan are<br>Table          &lt;table&gt;&lt;tr&gt;&lt;td&gt;Term&lt;/td&gt;&lt;td&gt;Rate&lt;/td&gt;&lt;/tr&gt;...<br>Image          figure-p2-chart.png</code></p></div>
+
+<p><strong>Strategy B — a small focused stack.</strong> Keep <strong>PyMuPDF</strong> as the core — on its own it already does text, embedded images, tables (<code>find_tables</code>) and page rendering for born-digital PDFs — and add only the two things it cannot do: <strong>Tesseract</strong> (or a cloud OCR) for scanned pages, and a <strong>vision model</strong> (gpt-4.1) to caption charts. Three components, each doing one job, wired by the block-level reader above.</p>
+
+<div class="tipbox">
+  <div class="lbl">✅ Suggestion — which to pick</div>
+  <p><strong>Ship fast, prove the idea:</strong> start with ONE all-in-one — Unstructured or Docling if the data must stay on-prem, Azure AI Document Intelligence if you want zero layout code and your compliance team approves the cloud. You get text, tables and images in one call and move on.</p>
+  <p><strong>Scale and control:</strong> move to the focused stack — <strong>PyMuPDF + Tesseract + a vision model</strong> — when per-page cost at millions of pages, on-prem requirements, or the need to tune each element type justify the extra code. PyMuPDF is the best single core library for born-digital work; you only add OCR and captioning for the elements it genuinely can't handle.</p>
+  <p><strong>Rule of thumb:</strong> one tool until cost or control forces the split. Don't hand-assemble five libraries on day one, and don't pay cloud per-page rates on a million clean memos on day one either.</p>
+</div>
+
 <div class="card">
   <div class="lbl">⚙️ In production</div>
   <p><strong>Cost &amp; latency.</strong> These three cures are the expensive end of parsing. OCR at 300 DPI is CPU-heavy (hundreds of milliseconds to seconds per page); cloud OCR (Textract, Azure AI Document Intelligence) bills per page; vision captioning is an LLM call per figure. So you run them <em>only</em> on pages that need them — scans, figure-bearing pages, multi-column layouts — gated by a cheap detector, not on the whole collection.</p>
@@ -5611,6 +5683,92 @@ print(f"assembled {len(blocks)} clean blocks")
 <div class="qa">
   <div class="q">Q. "A customer gets a blank answer from a loan agreement you can see contains the clause. What's your first suspect?"</div>
   <div class="a">A. A scanned page with no text layer — the extractor returned an empty string and the pipeline indexed nothing, silently. That's why you OCR scans and fail <em>loud</em> when OCR output is near-empty. The depth signal: name the three hard-page types and their cures — multi-column layouts need layout-aware reading, figures/charts need vision captioning (prompted to state every value, and to say "not legible" rather than hallucinate), scans need OCR — and always validate OCR'd account numbers and amounts against lengths and checksums, because 0/O and 1/l/I confusions in finance are catastrophic.</div>
+</div>
+</section>
+
+
+<section class="topic">
+<h3>The PDF parser landscape — every tool, and when to reach for it</h3>
+<p class="lede">Parsers do four different jobs; picking the right tool starts with knowing which job your page needs, then which library is best at it.</p>
+
+<p>"Parse the PDF" hides four separate problems, and no single library is best at all four: pull <strong>text</strong> out of a digitally-born PDF, recover <strong>layout and tables</strong>, <strong>OCR</strong> a scan into characters, and extract <strong>structured fields</strong> from a form. Here is each tool, what it is genuinely best at, and when to reach for it.</p>
+
+<h4>Fast text extractors — PyMuPDF and its relatives</h4>
+<p>For a PDF that was <em>born digital</em> (exported from Word, a web page, a reporting system), the text is already in the file — you just need to read it out quickly and in the right order. Three libraries do this, and the differences matter:</p>
+<ul>
+  <li><strong>PyMuPDF</strong> (imported as <code>pymupdf</code> / <code>fitz</code>) — the best default. It is the fastest, extracts text <em>with its position on the page</em> (so reading order and columns can be reconstructed), pulls out embedded images, and renders any page to an image for OCR or vision. One library covers text, images and rendering. The catch is its <strong>AGPL licence</strong>: free for internal and open-source use, but a commercial licence is needed to ship it inside a closed-source product — check with legal before you build on it.</li>
+  <li><strong>pypdf</strong> — pure-Python, permissive <strong>BSD licence</strong>, no native dependency. Best when the AGPL licence is a problem, or when the job is <em>manipulating</em> PDFs (merge, split, rotate, encrypt, read metadata) rather than high-fidelity text. Slower, and weaker on reading order and tables than PyMuPDF.</li>
+  <li><strong>pdfium</strong> (via <code>pypdfium2</code>) — Google's PDF engine, the same one inside Chrome. Permissive licence, excellent at <strong>rendering pages to images</strong>, solid text extraction. Reach for it when you need Chrome-grade rendering or a permissive licence and PyMuPDF's AGPL rules you out.</li>
+</ul>
+<p><strong>When to use which:</strong> PyMuPDF for almost all born-digital work (speed + text + images + render in one), unless its licence blocks you — then pypdf for permissive text and document manipulation, or pdfium for permissive high-quality rendering. All three return <em>nothing useful</em> on a scanned page, because there is no text layer to read; that is a job for OCR or Document AI below.</p>
+
+<h4>Layout &amp; table extractors</h4>
+<p>When the <em>structure</em> is the knowledge — a fee table, a multi-column brochure, a document with real headings — a plain text dump scrambles it. These tools recover the shape:</p>
+<ul>
+  <li><strong>pdfplumber</strong> — precise word and line coordinates; the best open tool for <strong>tables with visible ruling lines</strong>, and for debugging exactly where text sits on a page. Slower, Python-only.</li>
+  <li><strong>Camelot</strong> — table-focused: "lattice" mode for ruled tables, "stream" mode for tables held together only by whitespace. Use it for clean, tabular PDFs when pdfplumber struggles.</li>
+  <li><strong>Unstructured</strong> — partitions many file types (PDF, HTML, Word, email) into typed elements: titles, narrative, lists, tables. Best when you want <strong>one library across formats</strong> with decent reading order; heavier to install and run.</li>
+  <li><strong>Docling</strong> (IBM, open source) — a modern layout model that converts documents to clean structured Markdown/JSON with strong <strong>reading order and table structure</strong>. A strong open alternative to the cloud services when you want layout quality without sending data off-site.</li>
+</ul>
+<p><strong>When to use which:</strong> pdfplumber or Camelot when the target is <em>tables</em>; Unstructured or Docling when you need good <em>reading order and mixed layout</em> across many formats and want to stay on your own hardware.</p>
+
+<h4>OCR for scans</h4>
+<p>A scanned or photographed page is just pixels — OCR turns those pixels back into characters. <strong>Tesseract</strong> (via <code>pytesseract</code>) is the classic: free, runs locally, good on clean scans, weak on messy pages and handwriting. Use it when you have an on-prem requirement, clean scans, and no budget for a cloud service. For messy scans, forms, or handwriting, the Document AI services below are far more accurate.</p>
+
+<h4>Vision &amp; cloud Document AI — the heavy artillery</h4>
+<p>The hardest pages — scanned forms, dense financial tables, handwriting, odd layouts — are where cloud document services and vision parsers earn their cost. They combine OCR, layout, and trained models that return <em>structured fields with confidence scores</em>, not just text.</p>
+
+<p><strong>Azure AI Document Intelligence</strong> (formerly Form Recognizer) is the one most banks on Microsoft's stack reach for, so it is worth knowing in detail:</p>
+<ul>
+  <li><strong>Prebuilt models, no training needed:</strong> <code>prebuilt-read</code> (OCR + text + language), <code>prebuilt-layout</code> (tables, headings, reading order, and <em>selection marks</em> — ticked checkboxes), and domain models that return named fields out of the box: <strong>Invoice, Receipt, ID document, Bank statement, Pay stub, US tax (W-2/1098/1099), Health insurance card, Contract, Mortgage, Cheque</strong>. For a bank, the statement, ID and tax models alone remove a mountain of custom work.</li>
+  <li><strong>Custom models:</strong> train <em>custom extraction</em> on your own forms from as few as five samples, or <em>custom classification</em> to route a mixed inbox to the right model.</li>
+  <li><strong>What you get back:</strong> the full reading-order text, tables as rows/columns, key-value pairs, selection marks, <strong>per-field confidence scores</strong>, and <strong>bounding boxes</strong> so you can show a human exactly where each value came from. Handwriting and 100+ languages are supported.</li>
+  <li><strong>Cost (rough, 2026):</strong> around <strong>$1.50 per 1,000 pages</strong> for Read and Layout, roughly <strong>$10 per 1,000</strong> for the prebuilt domain models, custom higher — call it $0.01–0.05 per page, which is why you gate it behind a cheap tier (next topic).</li>
+  <li><strong>Compliance (why a bank picks it):</strong> regional endpoints for <strong>data residency</strong>, private networking (VNet / private endpoints) so documents never traverse the public internet, and a contractual <strong>no-training-on-your-data</strong> stance. These controls, more than accuracy, are often the deciding factor for KYC and statement processing.</li>
+</ul>
+
+<pre><code>import os
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
+from azure.core.credentials import AzureKeyCredential
+
+client = DocumentIntelligenceClient(                      <span class="cmt"># regional endpoint keeps data in-region</span>
+    endpoint=os.environ["AZURE_DI_ENDPOINT"],
+    credential=AzureKeyCredential(os.environ["AZURE_DI_KEY"]))
+
+with open("scanned_kyc.pdf", "rb") as f:                  <span class="cmt"># a scanned form with tables + checkboxes</span>
+    poller = client.begin_analyze_document(               <span class="cmt"># async: returns when the service finishes</span>
+        "prebuilt-layout", AnalyzeDocumentRequest(bytes_source=f.read()))
+result = poller.result()
+
+print(result.content[:60])                                <span class="cmt"># full text, in reading order</span>
+for t in result.tables:                                   <span class="cmt"># tables recovered with structure</span>
+    print(f"table: {t.row_count}x{t.column_count}")
+for kv in (result.key_value_pairs or []):                 <span class="cmt"># form fields as key -> value, with confidence</span>
+    val = kv.value.content if kv.value else ""
+    print(f"{kv.key.content} -> {val}  (conf {kv.confidence:.2f})")
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>KNOW YOUR CUSTOMER FORM  Full name: Priya Sharma  Account<br>table: 6x2<br>Full name -&gt; Priya Sharma  (conf 0.98)<br>Date of birth -&gt; 1991-04-12  (conf 0.97)</code></p></div>
+
+<p>The two other big clouds are direct equivalents, and the right one is usually "whichever cloud you are already on": <strong>AWS Textract</strong> (OCR, forms, tables, and natural-language <em>Queries</em> like "what is the account number?") for AWS shops, and <strong>Google Document AI</strong> (processors for OCR, forms, invoices, IDs) for GCP. For turning <em>complex layouts into clean Markdown to feed RAG</em> specifically, <strong>LlamaParse</strong> and <strong>Reducto</strong> are LLM/vision parsers built for that job rather than for structured-field extraction.</p>
+
+<p>The quick rule: pick <strong>Azure / AWS / Google Document AI</strong> when you need <em>structured fields, confidence scores and compliance</em> (KYC, statements, invoices); pick <strong>LlamaParse / vision</strong> when you need <em>messy pages turned into clean text/Markdown</em> for retrieval.</p>
+
+<div class="tipbox">
+  <div class="lbl">✅ When to use which — the short version</div>
+  <ul>
+    <li><strong>Born-digital PDF, just need the text/images:</strong> PyMuPDF (pypdf or pdfium if its AGPL licence is a problem).</li>
+    <li><strong>Tables are the knowledge:</strong> pdfplumber or Camelot (ruled vs whitespace tables).</li>
+    <li><strong>Mixed layout / many formats, stay on-prem:</strong> Unstructured or Docling.</li>
+    <li><strong>Scans, clean, on-prem, no budget:</strong> Tesseract.</li>
+    <li><strong>Scanned forms / KYC / statements needing fields + confidence + compliance:</strong> Azure AI Document Intelligence (or AWS Textract / Google Document AI on those clouds).</li>
+    <li><strong>Messy complex layouts to clean Markdown for RAG:</strong> LlamaParse / vision.</li>
+  </ul>
+</div>
+
+<div class="qa">
+  <div class="q">Q. "Which PDF parser do you use?" — and the real follow-up, "why that one?"</div>
+  <div class="a">A. There is no single answer; it depends on the page. PyMuPDF for born-digital text and images because it is fast and gives positions; pdfplumber or Camelot when tables are the point; Tesseract for cheap on-prem OCR; and Azure AI Document Intelligence (or Textract / Document AI) for scanned forms where you need structured fields, confidence scores, and data-residency compliance. <strong>Strong answer adds:</strong> you don't pick one — you run the cheap extractor first and escalate only the pages that fail to the expensive one, which is the tiered pipeline in the next topic. Naming the <em>licence</em> trap (PyMuPDF is AGPL) and the <em>compliance</em> reason a bank picks a specific cloud shows real production experience.</p></div>
 </div>
 </section>
 
