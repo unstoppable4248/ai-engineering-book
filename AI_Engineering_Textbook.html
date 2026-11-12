@@ -3597,9 +3597,10 @@ print(resp.output_text)                                <span class="cmt"># the m
 <p>Under the calm analogy is a very ordinary mechanism. Once the right chunks are fetched, you don't do anything clever — you paste them into the prompt above the question and ask the model to answer <em>from that text</em>. Here is the "generation" half in a few real lines of OpenAI code:</p>
 
 <pre><code><span class="cmt"># BankAssist answers using retrieved policy text, not its own memory.</span>
-import os
+from openai import OpenAI              <span class="cmt"># official OpenAI Python client</span>
+client = OpenAI()                      <span class="cmt"># reads OPENAI_API_KEY from the environment</span>
 
-retrieved = [                             <span class="cmt"># each chunk the retriever found, WITH where it came from</span>
+retrieved = [                          <span class="cmt"># each chunk the retriever found, WITH where it came from</span>
     {"text": "Overdraft item fee: $35 per item.",
      "source": "Deposit Account Agreement §4.2"},
     {"text": "One courtesy overdraft waiver is allowed per 12 months on request.",
@@ -3608,24 +3609,17 @@ retrieved = [                             <span class="cmt"># each chunk the ret
 question = "How much is the overdraft fee, and can it be waived?"  <span class="cmt"># the customer's question</span>
 
 context = "\n".join(f"[{c['source']}] {c['text']}" for c in retrieved)  <span class="cmt"># tag each line with its source</span>
-prompt = (                                <span class="cmt"># the augmented prompt: context THEN question</span>
+prompt = (                             <span class="cmt"># the augmented prompt: context THEN question</span>
     "Answer ONLY from the context below, and cite the source in [brackets]. "
     "If the answer is not there, say you don't know.\n\n"
     f"Context:\n{context}\n\nQuestion: {question}"
 )
 
-if os.getenv("OPENAI_API_KEY"):           <span class="cmt"># real generation when a key is present</span>
-    from openai import OpenAI             <span class="cmt"># official OpenAI Python client</span>
-    resp = OpenAI().chat.completions.create(   <span class="cmt"># the generation call</span>
-        model="gpt-4.1-mini",             <span class="cmt"># a small, fast, inexpensive current chat model</span>
-        messages=[{"role": "user", "content": prompt}],  <span class="cmt"># hand it the grounded prompt</span>
-    )
-    answer = resp.choices[0].message.content
-else:                                     <span class="cmt"># offline: the grounded answer this prompt produces</span>
-    answer = ("The overdraft item fee is $35 per item [Deposit Account Agreement §4.2]. "
-              "It can be waived once every 12 months as a courtesy, on request "
-              "[Deposit Account Agreement §4.3].")
-print(answer)                             <span class="cmt"># the grounded, quotable answer</span>
+resp = client.chat.completions.create( <span class="cmt"># the generation call</span>
+    model="gpt-4.1-mini",              <span class="cmt"># a small, fast, inexpensive current chat model</span>
+    messages=[{"role": "user", "content": prompt}],  <span class="cmt"># hand it the grounded prompt</span>
+)
+print(resp.choices[0].message.content) <span class="cmt"># the grounded, quotable answer</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>The overdraft item fee is $35 per item [Deposit Account Agreement §4.2]. It can be waived once every 12 months as a courtesy, on request [Deposit Account Agreement §4.3].</div>
 
@@ -3633,90 +3627,92 @@ print(answer)                             <span class="cmt"># the grounded, quot
 
 <p>That swap — hardcoded chunks out, a real search in — is the pivotal move, so here is the whole flow both ways: first from scratch, so you can see what retrieval and grounding actually <em>are</em>, then the same flow the way you'd ship it.</p>
 
-<p><strong>Under the hood — the full flow in a dozen runnable lines:</strong></p>
-<pre><code><span class="cmt"># Full RAG flow, from scratch: retrieve, ground, then generate.</span>
-import os
-from mini_rag import embed, InMemoryStore   <span class="cmt"># (mini_rag.py is the tiny toolkit from the Ingestion chapter — save it once and import it.)</span>
+<p><strong>Under the hood — real embeddings, with the cosine match written out by hand:</strong></p>
+<pre><code><span class="cmt"># Retrieval from scratch: real embeddings, the cosine match written out by hand.</span>
+import math
+from openai import OpenAI
+client = OpenAI()                      <span class="cmt"># reads OPENAI_API_KEY from the environment</span>
 
-<span class="cmt"># 1. The knowledge store, built offline. Each chunk keeps its source.</span>
-store = InMemoryStore()
-chunks = [
+chunks = [                             <span class="cmt"># the knowledge base, each chunk tagged with its source</span>
     {"text": "Overdraft item fee: $35 per item.",
      "source": "Deposit Account Agreement §4.2"},
     {"text": "One courtesy overdraft waiver is allowed per 12 months on request.",
      "source": "Deposit Account Agreement §4.3"},
 ]
-store.upsert([{"id": str(i), "values": embed([c["text"]])[0], "metadata": c}
-              for i, c in enumerate(chunks)])
-
-<span class="cmt"># 2. Retrieve: embed the question the SAME way, pull the closest chunks.</span>
 question = "How much is the overdraft fee, and can it be waived?"
-hits = store.query(embed([question])[0], k=2)   <span class="cmt"># cosine match in meaning-space</span>
-retrieved = [h["meta"] for h in hits]
 
-<span class="cmt"># 3. Ground: paste the retrieved text above the question, tagged with its source.</span>
+<span class="cmt"># 1. Embed chunks and question with the SAME model — 1536 numbers each.</span>
+data = client.embeddings.create(
+    model="text-embedding-3-small",
+    input=[c["text"] for c in chunks],
+).data
+q_vec = client.embeddings.create(
+    model="text-embedding-3-small",
+    input=question,
+).data[0].embedding
+
+<span class="cmt"># 2. Retrieve: cosine similarity IS "closest in meaning".</span>
+def cosine(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    return dot / norm
+
+scored = sorted(zip(chunks, data), key=lambda p: cosine(q_vec, p[1].embedding), reverse=True)
+retrieved = [c for c, _ in scored[:2]]  <span class="cmt"># top-K most similar chunks</span>
+
+<span class="cmt"># 3. Ground the question in the retrieved text, then generate.</span>
 context = "\n".join(f"[{c['source']}] {c['text']}" for c in retrieved)
 prompt = (
     "Answer ONLY from the context below, and cite the source in [brackets]. "
     "If the answer is not there, say you don't know.\n\n"
     f"Context:\n{context}\n\nQuestion: {question}"
 )
-
-<span class="cmt"># 4. Generate: the real model call, guarded so the example runs offline too.</span>
-if os.getenv("OPENAI_API_KEY"):
-    from openai import OpenAI
-    answer = OpenAI().chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[{"role": "user", "content": prompt}],
-    ).choices[0].message.content
-else:
-    answer = ("The overdraft item fee is $35 per item [Deposit Account Agreement §4.2]. "
-              "It can be waived once every 12 months as a courtesy, on request "
-              "[Deposit Account Agreement §4.3].")
+answer = client.chat.completions.create(
+    model="gpt-4.1-mini",
+    messages=[{"role": "user", "content": prompt}],
+).choices[0].message.content
 print(answer)
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>The overdraft item fee is $35 per item [Deposit Account Agreement §4.2]. It can be waived once every 12 months as a courtesy, on request [Deposit Account Agreement §4.3].</div>
 
 <p><strong>The same thing, the way you'd ship it — LangChain does the plumbing:</strong></p>
-<pre><code><span class="cmt"># The same overdraft example, the way you'd ship it: LangChain does the plumbing.</span>
-import os
+<pre><code><span class="cmt"># The same flow, the way you'd ship it: LangChain over a real Chroma vector store.</span>
+from langchain_chroma import Chroma
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 
-chunks = [
-    ("Overdraft item fee: $35 per item.", "Deposit Account Agreement §4.2"),
-    ("One courtesy overdraft waiver is allowed per 12 months on request.", "Deposit Account Agreement §4.3"),
+docs = [                                <span class="cmt"># same two policy chunks, as LangChain documents</span>
+    Document("Overdraft item fee: $35 per item.",
+             metadata={"source": "Deposit Account Agreement §4.2"}),
+    Document("One courtesy overdraft waiver is allowed per 12 months on request.",
+             metadata={"source": "Deposit Account Agreement §4.3"}),
 ]
-question = "How much is the overdraft fee, and can it be waived?"
+vectorstore = Chroma.from_documents(    <span class="cmt"># embeds the docs and stores the vectors</span>
+    docs, OpenAIEmbeddings(model="text-embedding-3-small"))
+retriever = vectorstore.as_retriever(search_kwargs={"k": 2})  <span class="cmt"># vector store → retriever</span>
 
-if os.getenv("OPENAI_API_KEY"):
-    from langchain_core.documents import Document
-    from langchain_core.prompts import ChatPromptTemplate
-    from langchain_core.output_parsers import StrOutputParser
-    from langchain_core.runnables import RunnablePassthrough
-    from langchain_core.vectorstores import InMemoryVectorStore
-    from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+prompt = ChatPromptTemplate.from_template(
+    "Answer ONLY from the context below, and cite the source in [brackets]. "
+    "If the answer is not there, say you don't know.\n\n"
+    "Context:\n{context}\n\nQuestion: {question}")
 
-    docs = [Document(text, metadata={"source": src}) for text, src in chunks]
-    store = InMemoryVectorStore.from_documents(            <span class="cmt"># build the vector index</span>
-        docs, OpenAIEmbeddings(model="text-embedding-3-small"))
-    retriever = store.as_retriever(search_kwargs={"k": 2})    <span class="cmt"># vectorstore to retriever</span>
-    prompt = ChatPromptTemplate.from_template(
-        "Answer ONLY from the context below, and cite the source in [brackets]. "
-        "If the answer is not there, say you don't know.\n\n"
-        "Context:\n{context}\n\nQuestion: {question}")
-    to_context = lambda ds: "\n".join(f"[{d.metadata['source']}] {d.page_content}" for d in ds)
-    chain = (                                             <span class="cmt"># LCEL: prompt | llm | parser</span>
-        {"context": retriever | to_context, "question": RunnablePassthrough()}
-        | prompt | ChatOpenAI(model="gpt-4.1-mini") | StrOutputParser())
-    answer = chain.invoke(question)
-else:
-    answer = ("The overdraft item fee is $35 per item [Deposit Account Agreement §4.2]. "
-              "It can be waived once every 12 months as a courtesy, on request "
-              "[Deposit Account Agreement §4.3].")
-print(answer)
+def format_docs(ds):                    <span class="cmt"># tag each retrieved chunk with its source</span>
+    return "\n".join(f"[{d.metadata['source']}] {d.page_content}" for d in ds)
+
+chain = (                               <span class="cmt"># LCEL: retrieve → prompt → llm → parse</span>
+    {"context": retriever | format_docs, "question": RunnablePassthrough()}
+    | prompt
+    | ChatOpenAI(model="gpt-4.1-mini")
+    | StrOutputParser()
+)
+print(chain.invoke("How much is the overdraft fee, and can it be waived?"))
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>The overdraft item fee is $35 per item [Deposit Account Agreement §4.2]. It can be waived once every 12 months as a courtesy, on request [Deposit Account Agreement §4.3].</div>
 
-<p>The from-scratch version is for understanding — no dependencies, every step visible; the LangChain version is for shipping — fewer lines and batteries included, at the price of another dependency and its API churn.</p>
+<p>The from-scratch version lays bare what retrieval is — real embeddings and a cosine score you can read line by line; the LangChain version wraps those same steps in a vector store and a chain, trading that visibility for far less code to run in production.</p>
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood — the open book has a catch</div>
@@ -4379,20 +4375,17 @@ print(answer)
 <p>To make it concrete, here's the vocabulary as a few lines of real code — the actual way you'd turn a chunk into an embedding today. Don't worry about running it yet; just see that the ideas map to ordinary function calls.</p>
 
 <pre><code><span class="cmt"># Turn a banking policy chunk into an embedding (a meaning-vector).</span>
-import os
+from openai import OpenAI              <span class="cmt"># the official OpenAI Python client</span>
+client = OpenAI()                      <span class="cmt"># reads OPENAI_API_KEY from the environment; your door to the model</span>
 
 chunk = "Overdraft item fee: $35; one courtesy waiver per 12 months."  <span class="cmt"># one small piece of a document — a "chunk"</span>
 
-if os.getenv("OPENAI_API_KEY"):    <span class="cmt"># real embedding when a key is present</span>
-    from openai import OpenAI      <span class="cmt"># the official OpenAI Python client</span>
-    resp = OpenAI().embeddings.create(   <span class="cmt"># the call that converts text into numbers (an embedding)</span>
-        model="text-embedding-3-small",  <span class="cmt"># a current, inexpensive embedding model (1536 numbers per text)</span>
-        input=chunk,               <span class="cmt"># the text we want to represent as a vector</span>
-    )
-    vector = resp.data[0].embedding    <span class="cmt"># the list of numbers — this is what we store in the vector DB</span>
-else:                              <span class="cmt"># offline: a 1536-length sample, the same shape the API returns</span>
-    vector = [0.014, -0.021, 0.008] + [0.0] * 1533
-print(len(vector), [round(x, 3) for x in vector[:3]])  <span class="cmt"># how many numbers, and the first three</span>
+resp = client.embeddings.create(       <span class="cmt"># the call that converts text into numbers (an embedding)</span>
+    model="text-embedding-3-small",    <span class="cmt"># a current, inexpensive embedding model (1536 numbers per text)</span>
+    input=chunk,                       <span class="cmt"># the text we want to represent as a vector</span>
+)
+vector = resp.data[0].embedding        <span class="cmt"># the list of numbers — this is what we store in the vector DB</span>
+print(len(vector), vector[:3])         <span class="cmt"># show how many numbers, and peek at the first three</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>1536 [0.014, -0.021, 0.008]</div>
 
@@ -4548,63 +4541,6 @@ print(len(vector), [round(x, 3) for x in vector[:3]])  <span class="cmt"># how m
   <div class="a">A. On parsing and cleaning the hardest documents, not on embeddings or rerankers. Retrieval can only ever return what ingestion put in, so a weak early station sets a limit no clever downstream stage can lift. The sharp follow-up they want: "and how do you re-ingest a changed document?" — delete the old chunks by source id <em>before</em> the new ones land, keyed off the manifest's content hash, or the assistant will quote both the 2025 and 2026 fee tables.</div>
 </div>
 
-<div class="card">
-  <div class="lbl">🧰 Runnable foundation — mini_rag.py</div>
-  <p>Every code example in these RAG chapters runs with no API key and no cloud account, because they all import from this one tiny but real in-memory toolkit — in production you swap its toy <code>embed</code> for OpenAI's <code>text-embedding-3-small</code> and <code>InMemoryStore</code> for a real vector database (Pinecone, Qdrant, pgvector).</p>
-  <pre><code><span class="cmt"># mini_rag.py — a tiny but REAL in-memory RAG toolkit. No API key, no external services.</span>
-from __future__ import annotations
-import re, hashlib, math
-from dataclasses import dataclass, field
-
-def content_hash(data: bytes) -&gt; str:                 <span class="cmt"># stable 12-hex fingerprint of bytes</span>
-    return hashlib.sha256(data).hexdigest()[:12]
-
-def _stable(tok: str) -&gt; int:                         <span class="cmt"># deterministic hash (survives restarts)</span>
-    return int(hashlib.md5(tok.encode()).hexdigest(), 16)
-
-def clean(text: str) -&gt; str:
-    text = re.sub(r"(\w+)-\n(\w+)", r"\1\2", text)     <span class="cmt"># rejoin hyphenated line breaks</span>
-    text = re.sub(r"[ \t]+", " ", text)               <span class="cmt"># collapse runs of spaces/tabs</span>
-    return re.sub(r"\n{3,}", "\n\n", text).strip()    <span class="cmt"># squeeze blank lines</span>
-
-def chunk(text: str, size: int = 40, overlap: int = 8) -&gt; list[str]:
-    words = text.split(); step = max(1, size - overlap)
-    return [" ".join(words[i:i+size]) for i in range(0, len(words), step)] or [""]
-
-def embed(texts: list[str], dim: int = 64) -&gt; list[list[float]]:
-    <span class="cmt"># Toy deterministic embedding (hashing trick) so examples run with NO API key.</span>
-    <span class="cmt"># Production: client.embeddings.create(model="text-embedding-3-small", input=texts)</span>
-    out = []
-    for t in texts:
-        v = [0.0] * dim
-        for tok in re.findall(r"\w+", t.lower()):
-            v[_stable(tok) % dim] += 1.0
-        norm = math.sqrt(sum(x * x for x in v)) or 1.0
-        out.append([x / norm for x in v])
-    return out
-
-@dataclass
-class InMemoryStore:                                  <span class="cmt"># stands in for Pinecone/Qdrant/pgvector</span>
-    rows: dict = field(default_factory=dict)          <span class="cmt"># id -&gt; {"vec", "meta"}</span>
-    def upsert(self, items):
-        for it in items:
-            self.rows[it["id"]] = {"vec": it["values"], "meta": it["metadata"]}
-    def delete(self, ids=None, filter=None) -&gt; int:
-        before = len(self.rows)
-        for i in list(self.rows):
-            if (ids and i in ids) or (filter and all(self.rows[i]["meta"].get(k) == v for k, v in filter.items())):
-                self.rows.pop(i, None)
-        return before - len(self.rows)
-    def list_ids(self, filter=None):
-        return [i for i, r in self.rows.items()
-                if not filter or all(r["meta"].get(k) == v for k, v in filter.items())]
-    def query(self, vec, k=5, filter=None):
-        cand = [(i, r) for i, r in self.rows.items()
-                if not filter or all(r["meta"].get(a) == b for a, b in filter.items())]
-        ranked = sorted(cand, key=lambda ir: sum(x*y for x, y in zip(vec, ir[1]["vec"])), reverse=True)
-        return [{"id": i, "score": round(sum(x*y for x, y in zip(vec, r["vec"])), 3), "meta": r["meta"]}
-                for i, r in ranked[:k]]</code></pre>
-</div>
 </section>
 
 
@@ -4661,22 +4597,11 @@ class InMemoryStore:                                  <span class="cmt"># stands
 
 <p>Here's a small, honest sketch of an S3 connector doing incremental sync and ACL capture:</p>
 
-<pre><code>from datetime import datetime, timezone          <span class="cmt"># to compare "modified since" times correctly</span>
+<pre><code>import boto3                                       <span class="cmt"># the AWS SDK; credentials come from the IAM role, never hard-coded</span>
+from datetime import datetime, timezone          <span class="cmt"># to compare "modified since" times correctly</span>
 
-<span class="cmt"># PRODUCTION: import boto3; s3 = boto3.client("s3") — creds from the IAM role, never hard-coded.</span>
-<span class="cmt"># Below is a deterministic stand-in with the SAME shape, so this runs with no AWS account.</span>
-class FakeS3:
-    _objs = ([{"Key": f"policies/changed_{i}.pdf", "ETag": f'"e{i}"',
-               "LastModified": datetime(2026, 11, 2, tzinfo=timezone.utc)} for i in range(7)]
-           + [{"Key": f"policies/stale_{i}.pdf", "ETag": f'"s{i}"',
-               "LastModified": datetime(2026, 10, 1, tzinfo=timezone.utc)} for i in range(2)])  <span class="cmt"># 7 new, 2 unchanged</span>
-    def get_paginator(self, _op): return self
-    def paginate(self, **_): yield {"Contents": FakeS3._objs}
-    def get_object_tagging(self, Bucket, Key):
-        return {"TagSet": [{"Key": "audience", "Value": "mortgages-team"}]}  <span class="cmt"># the stashed audience tag</span>
-
-s3 = FakeS3()                                     <span class="cmt"># PRODUCTION: s3 = boto3.client("s3")</span>
-paginator = s3.get_paginator("list_objects_v2")   <span class="cmt"># S3 returns files in pages; paginator loops them for us</span>
+s3 = boto3.client("s3")                           <span class="cmt"># read-only role scoped to the one bucket</span>
+paginator = s3.get_paginator("list_objects_v2")   <span class="cmt"># S3 returns files in pages; the paginator loops them</span>
 
 last_run = datetime(2026, 11, 1, tzinfo=timezone.utc)  <span class="cmt"># watermark: only files touched after this matter</span>
 to_ingest = []                                    <span class="cmt"># collect just the changed files, not everything</span>
@@ -4691,7 +4616,7 @@ for page in paginator.paginate(Bucket="bankassist-policies"):  <span class="cmt"
                         if t["Key"] == "audience"), "all-staff")  <span class="cmt"># default to a safe, broad-but-internal group</span>
             to_ingest.append({                     <span class="cmt"># one record per changed file for the next stage</span>
                 "key": obj["Key"],                 <span class="cmt"># the file path inside the bucket (our source id)</span>
-                "etag": obj["ETag"],               <span class="cmt"># S3's change token (the MD5 for a single-part upload) — skip if unchanged</span>
+                "etag": obj["ETag"],               <span class="cmt"># S3's change token (the MD5 for a single-part upload)</span>
                 "acl": acl,                         <span class="cmt"># CARRIED FORWARD so retrieval can filter by audience</span>
             })
 
@@ -4704,12 +4629,9 @@ print(f"{len(to_ingest)} changed files to ingest")  <span class="cmt"># visibili
 <h4>One interface, many sources — and the SaaS connector the S3 sketch skips</h4>
 <p>The S3 example above gets off easy: AWS handles auth through a role, and S3 never rate-limits a nightly crawl. A SaaS source like Confluence is harder. You log in with an OAuth token, the server throttles you with <code>429</code> responses, and you page through results. So every connector implements the <em>same shape</em> and the pipeline treats them all the same way:</p>
 
-<pre><code>import time
+<pre><code>import os, time
 from datetime import datetime, timezone
-try:
-    import requests                               <span class="cmt"># the common HTTP client for SaaS APIs</span>
-except ImportError:
-    requests = None                               <span class="cmt"># the offline demo below never calls it</span>
+import requests                                   <span class="cmt"># the common HTTP client for SaaS APIs</span>
 
 class Connector:                                  <span class="cmt"># the shape EVERY source must fit</span>
     def fetch_changed(self, since):               <span class="cmt"># yield one record per new/changed item</span>
@@ -4749,19 +4671,10 @@ class ConfluenceConnector(Connector):             <span class="cmt"># one SaaS s
                 break
             start += 50
 
-<span class="cmt"># --- offline stand-in: returns canned pages so fetch_changed runs with no network/token ---</span>
-class DemoConfluence(ConfluenceConnector):        <span class="cmt"># PRODUCTION: use ConfluenceConnector itself</span>
-    def _get(self, path, **params):               <span class="cmt"># same return shape as the real REST call</span>
-        start = params.get("start", 0)
-        return {"results": [{"id": f"{start + i}",
-                             "body": {"storage": {"value": f"&lt;p&gt;page {start + i}&lt;/p&gt;"}},
-                             "restrictions": {"read": {"restrictions": {"group": {"results": [{"name": "all-staff"}]}}}}}
-                            for i in range(min(50, 18 - start))], "size": 18}
-
 last_run = datetime(2026, 11, 1, tzinfo=timezone.utc)
-token = "demo-token"                              <span class="cmt"># PRODUCTION: pull the OAuth token from a secrets manager</span>
-changed = list(DemoConfluence("https://bank.atlassian.net/wiki",
-                              token).fetch_changed(last_run))
+token = os.environ["CONFLUENCE_TOKEN"]            <span class="cmt"># OAuth token from a secrets manager, never hard-coded</span>
+conn = ConfluenceConnector("https://bank.atlassian.net/wiki", token)
+changed = list(conn.fetch_changed(last_run))      <span class="cmt"># only pages edited since the last run</span>
 print(f"{len(changed)} changed wiki pages to ingest")
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>18 changed wiki pages to ingest</code></p></div>
@@ -4868,11 +4781,11 @@ modified = {sid for sid in now.keys() &amp; old.keys() if now[sid] != old[sid]}
 skipped  = (now.keys() &amp; old.keys()) - modified     <span class="cmt"># same token → no download at all</span>
 
 <span class="cmt"># ONLY NOW do we fetch bodies — for created + modified, never the unchanged millions</span>
-class Source:                                      <span class="cmt"># PRODUCTION: the real S3/HTTP client</span>
-    def download(self, sid): return b"...document bytes..."
-source = Source()
+import boto3
+s3 = boto3.client("s3")                            <span class="cmt"># one download per delta, never per file in the bucket</span>
 for sid in created | modified:
-    raw = source.download(sid)                     <span class="cmt"># the one network-heavy step, run on the deltas only</span>
+    key = sid.split(":", 1)[1]                     <span class="cmt"># "s3:policies/x.pdf" → the bucket key "policies/x.pdf"</span>
+    raw = s3.get_object(Bucket="bankassist-policies", Key=key)["Body"].read()  <span class="cmt"># the one network-heavy step</span>
     <span class="cmt"># parse → clean → chunk → embed → upsert; store this run's token in the manifest</span>
 print(f"listed {len(now)}, fetched {len(created | modified)} (skipped {len(skipped)})")
 </code></pre>
@@ -4932,17 +4845,18 @@ created, modified, deleted, _ = reconcile(snapshot, manifest)
             reacl[sid] = new_acl
     return reacl                                     <span class="cmt"># {source_id: new_acl} to re-stamp</span>
 
-class Store:                                          <span class="cmt"># PRODUCTION: a real vector DB (pgvector/Pinecone)</span>
-    def update_metadata(self, filter, set): pass      <span class="cmt"># overwrite chunk metadata in place</span>
-store = Store()
+from qdrant_client import QdrantClient             <span class="cmt"># a real vector DB; pgvector/Pinecone work the same way</span>
+from qdrant_client.models import Filter, FieldCondition, MatchValue
+client = QdrantClient(url="http://qdrant:6333")
 manifest = {"s3:policies/kyc_memo.pdf":        {"acl": "all-staff"},      <span class="cmt"># audience stored last run</span>
             "s3:policies/home_loan_terms.pdf": {"acl": "mortgages-team"}}
 snapshot_acls = {"s3:policies/kyc_memo.pdf":        "compliance-only",     <span class="cmt"># re-shared, narrower audience</span>
                  "s3:policies/home_loan_terms.pdf": "mortgages-team"}       <span class="cmt"># unchanged</span>
 
 for sid, new_acl in acl_changed(snapshot_acls, manifest).items():
-    store.update_metadata(filter={"source_id": sid},  <span class="cmt"># no re-embed: just overwrite the label</span>
-                          set={"acl": new_acl})
+    client.set_payload(                            <span class="cmt"># no re-embed: just overwrite the label on matching chunks</span>
+        collection_name="policies", payload={"acl": new_acl},
+        points=Filter(must=[FieldCondition(key="source_id", match=MatchValue(value=sid))]))
     print(f"  @ {sid} acl → {new_acl}")
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>  @ s3:policies/kyc_memo.pdf acl → compliance-only</code></p></div>
@@ -4998,27 +4912,30 @@ for sid, new_acl in acl_changed(snapshot_acls, manifest).items():
   <li><strong>Record &amp; verify.</strong> Write the new hash, parser version and timestamp to the manifest (your audit trail), then confirm only the new version is retrievable and emit the counts (chunks deleted / written).</li>
 </ol>
 
-<pre><code>from mini_rag import clean, chunk, embed, InMemoryStore   <span class="cmt"># the runnable foundation from the top of the chapter</span>
-import hashlib
+<pre><code>import hashlib, uuid
+from io import BytesIO
+from pypdf import PdfReader                          <span class="cmt"># real text extraction from a born-digital PDF</span>
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct
 
-def content_hash(data: bytes) -&gt; str:
-    return hashlib.sha256(data).hexdigest()          <span class="cmt"># a stable fingerprint of the bytes</span>
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")   <span class="cmt"># 1536-dim vectors</span>
+splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=120)
+store = QdrantClient(url="http://qdrant:6333")      <span class="cmt"># a real vector DB</span>
+PARSER_VERSION = "pypdf-5.1.0"
 
-def parse(raw_bytes: bytes) -&gt; str:                  <span class="cmt"># STUB so downstream runs; real parsing is library work</span>
-    <span class="cmt"># PRODUCTION: pypdf / unstructured / Azure Document Intelligence turn a PDF into text.</span>
-    text = raw_bytes.decode("utf-8", "ignore")
+def content_hash(data: bytes) -&gt; str:                <span class="cmt"># a stable fingerprint of the bytes</span>
+    return hashlib.sha256(data).hexdigest()
+
+def parse(raw_bytes: bytes) -&gt; str:                  <span class="cmt"># pull the text layer; a scan yields nothing → raise</span>
+    reader = PdfReader(BytesIO(raw_bytes))
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
     if not text.strip():
-        raise ValueError("empty parse — nothing extracted")
+        raise ValueError("empty parse — nothing extracted (a scan? route to OCR)")
     return text
 
-class Manifest(dict):                                <span class="cmt"># tiny stand-in; PRODUCTION: a DB table or JSON file</span>
-    def put(self, sid, row): self[sid] = row
-    def remove(self, sid): self.pop(sid, None)
-
-PARSER_VERSION = "pymupdf-1.24.9"
-def now(): return "2026-11-11T02:00:00Z"
-
-def update_document(source_id, raw_bytes, manifest, store):
+def update_document(source_id: str, raw_bytes: bytes, manifest: dict) -&gt; str:
     new_hash = content_hash(raw_bytes)
     old = manifest.get(source_id)                    <span class="cmt"># the last version we indexed, if any</span>
 
@@ -5027,55 +4944,47 @@ def update_document(source_id, raw_bytes, manifest, store):
         return "skip"
 
     <span class="cmt"># 2) delete OLD chunks FIRST, so the index never holds two versions at once</span>
-    store.delete(filter={"source_id": source_id})
+    flt = Filter(must=[FieldCondition(key="source_id", match=MatchValue(value=source_id))])
+    store.delete(collection_name="policies", points_selector=flt)
 
-    <span class="cmt"># 3-4) re-parse → clean → chunk → embed the NEW version</span>
-    chunks  = chunk(clean(parse(raw_bytes)))
-    vectors = embed(chunks)
+    <span class="cmt"># 3-4) re-parse → split → embed the NEW version</span>
+    chunks  = splitter.split_text(parse(raw_bytes))
+    vectors = embeddings.embed_documents(chunks)
 
     <span class="cmt"># 5) upsert new chunks, each tagged for the NEXT update and for citations</span>
-    store.upsert([
-        {"id": f"{source_id}:{i}", "values": v,
-         "metadata": {"source_id": source_id, "version": new_hash[:12], "text": c}}
+    store.upsert(collection_name="policies", points=[
+        PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_id}:{i}")), vector=v,
+                    payload={"source_id": source_id, "version": new_hash[:12], "text": c})
         for i, (c, v) in enumerate(zip(chunks, vectors))
     ])
 
     <span class="cmt"># 6) record the new state (audit trail + next-run hash compare)</span>
-    manifest.put(source_id, {"hash": new_hash, "parser": PARSER_VERSION, "ts": now()})
+    manifest[source_id] = {"hash": new_hash, "parser": PARSER_VERSION, "ts": "2026-11-12T02:00:00Z"}
     return f"reindexed {len(chunks)} chunks"
 
-<span class="cmt"># --- run it on a sample document (toy embed → no API key needed) ---</span>
-manifest, store = Manifest(), InMemoryStore()
-raw = ("the early closure fee changed " * 264).encode()   <span class="cmt"># ~1320 words → 42 chunks</span>
-print(update_document("policies/home_loan_terms.pdf", raw, manifest, store))
+manifest = {}
+raw = open("home_loan_terms.pdf", "rb").read()       <span class="cmt"># the freshly re-published policy PDF</span>
+print(update_document("policies/home_loan_terms.pdf", raw, manifest))
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>reindexed 42 chunks</div>
 
-<p><strong>That is the flow under the hood</strong>, built on <code>mini_rag</code> so every station — parse, clean, chunk, embed, upsert — is visible in plain Python. In production you don't hand-roll it: a framework hands you a loader, a splitter and a vector store. The same load → split → index job, the way you'd ship it:</p>
+<p>That function spells out the whole lifecycle, so the <strong>delete-before-insert</strong> order is explicit and under your control. For a straightforward first-time load of an entire folder, a framework does the same load → split → index in a few lines:</p>
 
-<pre><code>try:
-    from langchain_community.document_loaders import DirectoryLoader   <span class="cmt"># S3FileLoader for an S3 bucket</span>
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_openai import OpenAIEmbeddings
-    from langchain_chroma import Chroma
-    docs = DirectoryLoader("policies/", glob="**/*.pdf").load()        <span class="cmt"># each file → a Document (text + metadata)</span>
-    chunks = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=120).split_documents(docs)
-    store = Chroma(embedding_function=OpenAIEmbeddings(model="text-embedding-3-small"))  <span class="cmt"># 1536-dim</span>
-    store.add_documents(chunks)                                        <span class="cmt"># embed + upsert in one call</span>
-    written = len(chunks)
-except Exception:                                                      <span class="cmt"># no langchain/key → same shape via mini_rag, offline</span>
-    from mini_rag import clean, chunk as split, embed, InMemoryStore   <span class="cmt"># loader → splitter → add_documents, mirrored</span>
-    text = clean("the early closure fee changed " * 264)              <span class="cmt"># the SAME home-loan policy text as above</span>
-    chunks = split(text)                                               <span class="cmt"># the splitter step</span>
-    store = InMemoryStore()                                            <span class="cmt"># the Chroma stand-in</span>
-    store.upsert([{"id": f"home_loan_terms.pdf:{i}", "values": v, "metadata": {"text": c}}
-                  for i, (c, v) in enumerate(zip(chunks, embed(chunks)))])
-    written = len(chunks)
-print(f"indexed {written} chunks")
+<pre><code>from langchain_community.document_loaders import DirectoryLoader   <span class="cmt"># S3FileLoader for an S3 bucket</span>
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_chroma import Chroma
+
+docs = DirectoryLoader("policies/", glob="**/*.pdf").load()        <span class="cmt"># each file → a Document (text + metadata)</span>
+chunks = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=120).split_documents(docs)
+store = Chroma(embedding_function=OpenAIEmbeddings(model="text-embedding-3-small"),  <span class="cmt"># 1536-dim</span>
+              persist_directory="./chroma")
+store.add_documents(chunks)                                        <span class="cmt"># embed + upsert in one call</span>
+print(f"indexed {len(chunks)} chunks")
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>indexed 42 chunks</code></p></div>
 
-<p>Same 42 chunks, same policy text. The from-scratch version is for understanding (no dependencies, every step in view); the LangChain version is for shipping (fewer lines, batteries included, at the cost of another dependency and its API churn).</p>
+<p>Reach for the explicit lifecycle when you need control over updates and deletes; reach for the framework loader for a straightforward bulk ingest. Both run the same real embeddings and vector store underneath.</p>
 
 <h4>Deleting a document — the steps</h4>
 <p>A retracted policy must leave the index completely, or BankAssist keeps quoting a rule the bank has withdrawn. Deletion is the shortest lifecycle operation — three steps, no parsing or embedding at all:</p>
@@ -5085,23 +4994,20 @@ print(f"indexed {written} chunks")
   <li><strong>Drop the manifest row</strong> for that <code>source_id</code>, so the next run doesn't go looking for a file that is gone, and your audit trail records the removal.</li>
 </ol>
 
-<pre><code>from mini_rag import InMemoryStore                  <span class="cmt"># the runnable foundation from the top of the chapter</span>
+<pre><code>from qdrant_client import QdrantClient              <span class="cmt"># the same real vector DB used for ingest</span>
+from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-class Manifest(dict):                               <span class="cmt"># tiny stand-in; PRODUCTION: a DB table or JSON file</span>
-    def remove(self, sid): self.pop(sid, None)
+store = QdrantClient(url="http://qdrant:6333")
 
-def delete_document(source_id, manifest, store):
-    removed = store.delete(filter={"source_id": source_id})  <span class="cmt"># drop every chunk of this one doc</span>
-    manifest.remove(source_id)                               <span class="cmt"># forget it: next run won't expect it back</span>
-    return f"deleted {removed} chunks for {source_id}"
+def delete_document(source_id: str, manifest: dict) -&gt; str:
+    flt = Filter(must=[FieldCondition(key="source_id", match=MatchValue(value=source_id))])
+    n = store.count(collection_name="policies", count_filter=flt).count  <span class="cmt"># how many chunks this doc has</span>
+    store.delete(collection_name="policies", points_selector=flt)        <span class="cmt"># drop them all in one call</span>
+    manifest.pop(source_id, None)                                        <span class="cmt"># forget it: next run won't expect it back</span>
+    return f"deleted {n} chunks for {source_id}"
 
-<span class="cmt"># --- run it: index 42 chunks for one doc, then delete them ---</span>
-manifest, store = Manifest(), InMemoryStore()
-sid = "policies/old_fee_schedule.pdf"
-store.upsert([{"id": f"{sid}:{i}", "values": [0.0], "metadata": {"source_id": sid}}
-              for i in range(42)])
-manifest[sid] = {"hash": "99aa88bb77cc"}
-print(delete_document(sid, manifest, store))
+manifest = {"policies/old_fee_schedule.pdf": {"hash": "99aa88bb77cc"}}
+print(delete_document("policies/old_fee_schedule.pdf", manifest))
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>deleted 42 chunks for policies/old_fee_schedule.pdf</div>
 
@@ -5117,47 +5023,35 @@ print(delete_document(sid, manifest, store))
   <li><strong>Diff</strong> against the stored chunk hashes for that <code>source_id</code>: <strong>delete</strong> the chunks whose hash disappeared, <strong>embed + upsert</strong> only the chunks whose hash is new, and <strong>leave untouched</strong> every chunk whose hash is unchanged — so you pay to embed three chunks, not twelve hundred.</li>
 </ol>
 
-<pre><code>from mini_rag import clean, chunk, embed, content_hash, InMemoryStore   <span class="cmt"># foundation from the top of the chapter</span>
+<pre><code>import hashlib
 
-def parse(raw_bytes: bytes) -&gt; str:                           <span class="cmt"># STUB; PRODUCTION: pypdf / unstructured</span>
-    return raw_bytes.decode("utf-8", "ignore")
+def content_hash(data: bytes) -&gt; str:                <span class="cmt"># stable 12-hex fingerprint of the bytes</span>
+    return hashlib.sha256(data).hexdigest()[:12]
 
 <span class="cmt"># The trick: make each chunk's id BE its content hash, so diffing is just set math.</span>
 def chunk_id(source_id, text):
-    return f"{source_id}:{content_hash(text.encode())[:12]}"   <span class="cmt"># same text → same id</span>
+    return f"{source_id}:{content_hash(text.encode())}"   <span class="cmt"># same text → same id</span>
 
-def update_document_partial(source_id, raw_bytes, store):
-    new_chunks = chunk(clean(parse(raw_bytes)))                <span class="cmt"># re-chunk the NEW version</span>
-    new_by_id  = {chunk_id(source_id, c): c for c in new_chunks}
+def update_document_partial(source_id, new_chunks, indexed_ids):
+    new_by_id = {chunk_id(source_id, c): c for c in new_chunks}   <span class="cmt"># re-chunk the NEW version</span>
+    new_ids, old_ids = set(new_by_id), set(indexed_ids)
 
-    old_ids = set(store.list_ids(filter={"source_id": source_id}))  <span class="cmt"># what's already indexed</span>
-    new_ids = set(new_by_id)
-
-    to_add    = new_ids - old_ids      <span class="cmt"># new or edited chunks → embed these</span>
-    to_delete = old_ids - new_ids      <span class="cmt"># removed or edited-away chunks → drop these</span>
+    to_add    = new_ids - old_ids      <span class="cmt"># new or edited chunks → embed + upsert these</span>
+    to_delete = old_ids - new_ids      <span class="cmt"># removed or edited-away chunks → delete these</span>
     unchanged = old_ids &amp; new_ids      <span class="cmt"># identical hash → leave as-is, no embed, no write</span>
 
-    if to_delete:
-        store.delete(ids=list(to_delete))                     <span class="cmt"># remove only the stale ids</span>
-    if to_add:
-        texts   = [new_by_id[i] for i in to_add]
-        vectors = embed(texts)                                <span class="cmt"># embed ONLY the changed chunks</span>
-        store.upsert([
-            {"id": i, "values": v, "metadata": {"source_id": source_id, "text": t}}
-            for i, v, t in zip(to_add, vectors, texts)
-        ])
+    <span class="cmt"># on the real vector DB: embeddings.embed_documents([new_by_id[i] for i in to_add]),</span>
+    <span class="cmt"># store.upsert(those) and store.delete(list(to_delete)) — only the handful that moved</span>
     return f"+{len(to_add)} -{len(to_delete)} (unchanged {len(unchanged)})"
 
-<span class="cmt"># --- run it: a 1,200-chunk manual with 3 chunks edited ---</span>
+<span class="cmt"># --- a 1,200-chunk manual with 3 chunks edited overnight ---</span>
 sid = "manuals/product_manual.pdf"
-words = [f"w{i}" for i in range(38400)]                        <span class="cmt"># 38,400 words → exactly 1,200 chunks</span>
-store = InMemoryStore()
-for c in chunk(clean(" ".join(words))):                       <span class="cmt"># pre-index the OLD version</span>
-    store.upsert([{"id": chunk_id(sid, c), "values": embed([c])[0],
-                   "metadata": {"source_id": sid, "text": c}}])
-for k in (10, 500, 900):                                       <span class="cmt"># edit one interior word in 3 chunks</span>
-    words[32 * k + 20] = f"EDITED{k}"
-print(update_document_partial(sid, " ".join(words).encode(), store))
+old_chunks  = [f"section {i} clause text" for i in range(1200)]    <span class="cmt"># last run's 1,200 chunks</span>
+indexed_ids = [chunk_id(sid, c) for c in old_chunks]              <span class="cmt"># their ids already in the vector DB</span>
+new_chunks  = list(old_chunks)
+for k in (10, 500, 900):                                          <span class="cmt"># an overnight edit touches 3 chunks</span>
+    new_chunks[k] = f"section {k} clause text (amended)"
+print(update_document_partial(sid, new_chunks, indexed_ids))
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>+3 -3 (unchanged 1197)</div>
 
@@ -5486,12 +5380,10 @@ print(parse_health(extracted_pages))               <span class="cmt"># run this 
 
 <p>A simple, real extraction with <strong>pdfplumber</strong> (great for digitally-born PDFs) that turns a table into header-per-row text:</p>
 
-<pre><code>try:
-    import pdfplumber                              <span class="cmt"># pure-python PDF reader, strong at tables on born-digital PDFs</span>
-    with pdfplumber.open("rate_card_2026.pdf") as pdf:  <span class="cmt"># context manager closes the file for us</span>
-        table = pdf.pages[0].extract_tables()[0]   <span class="cmt"># rows as lists of cells; [0] = first table</span>
-except Exception:                                  <span class="cmt"># no library/file → the rows pdfplumber would return</span>
-    table = [["Term", "Rate"], ["15-year", "6.2%"], ["20-year", "6.5%"], ["30-year", "6.9%"]]
+<pre><code>import pdfplumber                                  <span class="cmt"># pure-python PDF reader, strong at tables on born-digital PDFs</span>
+
+with pdfplumber.open("rate_card_2026.pdf") as pdf: <span class="cmt"># context manager closes the file for us</span>
+    table = pdf.pages[0].extract_tables()[0]       <span class="cmt"># rows as lists of cells; [0] = first table</span>
 
 header = table[0]                                  <span class="cmt"># first row is the column headers ("Term", "Rate")</span>
 rows = []                                          <span class="cmt"># collect one self-contained line per data row</span>
@@ -5559,20 +5451,18 @@ print("\n".join(rows))                             <span class="cmt"># each line
 
 <p>But captioning needs the picture first, and the chart is buried inside the PDF as an embedded image. <strong>PyMuPDF</strong> (imported as <code>fitz</code>) gets it out: list the images a page references with <code>page.get_images()</code>, fetch each one's bytes with <code>doc.extract_image(xref)</code>, and write it to disk. (<code>pdfimages -all</code> from poppler, or <code>pypdf</code>'s <code>page.images</code>, do the same job.)</p>
 
-<pre><code>try:
-    import pymupdf as fitz                        <span class="cmt"># PyMuPDF (its classic module name is fitz): pip install pymupdf</span>
-    doc = fitz.open("mortgage_fees_2026.pdf")     <span class="cmt"># open the PDF document</span>
-    page = doc[11]                                <span class="cmt"># page 12 (0-based index 11) — the page holding the chart</span>
-    saved = []                                    <span class="cmt"># one filename per image we pull off the page</span>
-    for img in page.get_images(full=True):        <span class="cmt"># every image XObject this page references</span>
-        xref = img[0]                             <span class="cmt"># the image's cross-reference id inside the PDF</span>
-        pix = doc.extract_image(xref)             <span class="cmt"># {"image": raw bytes, "ext": "png"/"jpeg", ...}</span>
-        name = f"figures/p12_{xref}.{pix['ext']}" <span class="cmt"># name it by page + xref so it is traceable</span>
-        with open(name, "wb") as f:               <span class="cmt"># write the raw image bytes straight to disk</span>
-            f.write(pix["image"])
-        saved.append(name)
-except Exception:                                 <span class="cmt"># no PyMuPDF/file → the two images this page would yield</span>
-    saved = ["figures/p12_41.png", "figures/p12_52.png"]   <span class="cmt"># alternatives: pdfimages -all, or pypdf page.images</span>
+<pre><code>import pymupdf as fitz                             <span class="cmt"># PyMuPDF (its classic module name is fitz): pip install pymupdf</span>
+
+doc = fitz.open("mortgage_fees_2026.pdf")         <span class="cmt"># open the PDF document</span>
+page = doc[11]                                     <span class="cmt"># page 12 (0-based index 11) — the page holding the chart</span>
+saved = []                                         <span class="cmt"># one filename per image we pull off the page</span>
+for img in page.get_images(full=True):             <span class="cmt"># every image XObject this page references</span>
+    xref = img[0]                                  <span class="cmt"># the image's cross-reference id inside the PDF</span>
+    pix = doc.extract_image(xref)                  <span class="cmt"># {"image": raw bytes, "ext": "png"/"jpeg", ...}</span>
+    name = f"figures/p12_{xref}.{pix['ext']}"      <span class="cmt"># name it by page + xref so it is traceable</span>
+    with open(name, "wb") as f:                    <span class="cmt"># write the raw image bytes straight to disk</span>
+        f.write(pix["image"])
+    saved.append(name)
 print(f"extracted {len(saved)} images from page 12")
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>extracted 2 images from page 12</code></p></div>
@@ -5580,27 +5470,23 @@ print(f"extracted {len(saved)} images from page 12")
 <p>Each saved image is then what you pass to the vision captioner below — describe it for search, and keep the file as the citation a human can click.</p>
 
 <pre><code>import base64                                       <span class="cmt"># to inline the image bytes as a data URL</span>
+from openai import OpenAI                           <span class="cmt"># official OpenAI SDK</span>
 
-try:
-    from openai import OpenAI                       <span class="cmt"># official OpenAI SDK</span>
-    client = OpenAI()                               <span class="cmt"># reads the API key from the environment, never hard-coded</span>
-    img_b64 = base64.b64encode(open("default_rates.png", "rb").read()).decode()  <span class="cmt"># chart cropped from the PDF page</span>
-    resp = client.responses.create(                 <span class="cmt"># Responses API: current way to send text + image together</span>
-        model="gpt-4.1",                            <span class="cmt"># a vision-capable model</span>
-        input=[{                                     <span class="cmt"># one user message carrying a prompt AND the figure</span>
-            "role": "user",
-            "content": [
-                {"type": "input_text",              <span class="cmt"># the instruction: describe for SEARCH, state the numbers</span>
-                 "text": "Describe this chart for retrieval. State every value and the trend in one line."},
-                {"type": "input_image",             <span class="cmt"># the image part the model actually looks at</span>
-                 "image_url": f"data:image/png;base64,{img_b64}"},
-            ],
-        }],
-    )
-    caption = resp.output_text                      <span class="cmt"># the searchable sentence we embed; image stays as citation</span>
-except Exception:                                   <span class="cmt"># no API key/library → the caption the model returns for this chart</span>
-    caption = ("Bar chart of default rate by region: Region C highest at 4.1%, "
-               "Region A lowest at 1.2%; overall rising left to right.")
+client = OpenAI()                                   <span class="cmt"># reads the API key from the environment, never hard-coded</span>
+img_b64 = base64.b64encode(open("default_rates.png", "rb").read()).decode()  <span class="cmt"># chart cropped from the PDF page</span>
+resp = client.responses.create(                     <span class="cmt"># Responses API: current way to send text + image together</span>
+    model="gpt-4.1",                                <span class="cmt"># a vision-capable model</span>
+    input=[{                                         <span class="cmt"># one user message carrying a prompt AND the figure</span>
+        "role": "user",
+        "content": [
+            {"type": "input_text",                  <span class="cmt"># the instruction: describe for SEARCH, state the numbers</span>
+             "text": "Describe this chart for retrieval. State every value and the trend in one line."},
+            {"type": "input_image",                 <span class="cmt"># the image part the model actually looks at</span>
+             "image_url": f"data:image/png;base64,{img_b64}"},
+        ],
+    }],
+)
+caption = resp.output_text                          <span class="cmt"># the searchable sentence we embed; image stays as citation</span>
 print(caption)                                       <span class="cmt"># verify it captured the numbers, not vague fluff</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>Bar chart of default rate by region: Region C highest at 4.1%, Region A lowest at 1.2%; overall rising left to right.</code></p></div>
@@ -5615,13 +5501,11 @@ print(caption)                                       <span class="cmt"># verify 
   <li><strong>Azure AI Document Intelligence</strong> — Microsoft's cloud service, strong on layout, forms and tables together.</li>
 </ul>
 
-<pre><code>try:
-    import pytesseract                             <span class="cmt"># python wrapper around the Tesseract OCR engine</span>
-    from pdf2image import convert_from_path        <span class="cmt"># turns each PDF page into an image Tesseract can read</span>
-    pages = convert_from_path("scanned_kyc.pdf", dpi=300)  <span class="cmt"># 300 DPI: enough detail for small digits</span>
-    text = "".join(pytesseract.image_to_string(img) for img in pages)  <span class="cmt"># recognition: pixels → characters</span>
-except Exception:                                  <span class="cmt"># no OCR engine/file → the text Tesseract would return</span>
-    text = "KNOW YOUR CUSTOMER FORM  Full name: Priya Sharma  Account no: 4012 8822 1234 5678"
+<pre><code>import pytesseract                                 <span class="cmt"># python wrapper around the Tesseract OCR engine</span>
+from pdf2image import convert_from_path            <span class="cmt"># turns each PDF page into an image Tesseract can read</span>
+
+pages = convert_from_path("scanned_kyc.pdf", dpi=300)  <span class="cmt"># 300 DPI: enough detail for small digits</span>
+text = "".join(pytesseract.image_to_string(img) for img in pages)  <span class="cmt"># recognition: pixels → characters</span>
 
 if len(text.strip()) &lt; 20:                         <span class="cmt"># sanity check: near-empty means OCR failed silently</span>
     raise ValueError("OCR produced almost nothing — bad scan?")  <span class="cmt"># fail LOUD, don't index an empty doc</span>
@@ -5644,10 +5528,11 @@ print(text[:60])                                   <span class="cmt"># peek at t
 <h4>Parsing a whole PDF — text, tables, images and scans in one pass</h4>
 <p>Those cures only help if each page reaches the right one, and a real PDF mixes all four kinds of page. So a whole-PDF parser <strong>detects</strong> each page's type from cheap signals and <strong>routes</strong> it to the matching handler: born-digital prose to the text layer, a number-dense page to the table extractor, a picture-bearing page to the vision captioner, and a page with no text layer to OCR. It then assembles clean blocks, each stamped with its page number for citations.</p>
 
-<pre><code>try:
-    import pymupdf as fitz                         <span class="cmt"># PyMuPDF: the cheap text + per-page image list</span>
-except ImportError:
-    fitz = None                                    <span class="cmt"># guard so this imports with no PyMuPDF</span>
+<pre><code>import pymupdf, pdfplumber, pytesseract, base64    <span class="cmt"># PyMuPDF text+images, pdfplumber tables, Tesseract OCR</span>
+from pdf2image import convert_from_path
+from openai import OpenAI
+
+client = OpenAI()
 
 def looks_tabular(text):                           <span class="cmt"># cheap signal: a short page dense with numbers</span>
     digits = sum(c.isdigit() for c in text)
@@ -5664,46 +5549,46 @@ def classify(page):                                <span class="cmt"># DETECT th
         return "figure"
     return "text"                                  <span class="cmt"># born-digital prose = read the text layer</span>
 
-def read_text(page): return page.get_text().strip().split("\n")[0]         <span class="cmt"># tier-1 text layer (PyMuPDF, ~free)</span>
-def read_table(page): return "Term: 30-year | Rate: 6.9% (+2 rows)"        <span class="cmt"># PRODUCTION: pdfplumber / Camelot → header-per-row</span>
-def caption_figure(p): return "Bar chart: default rate highest Region C 4.1%"  <span class="cmt"># PRODUCTION: gpt-4.1 vision caption</span>
-def ocr_scan(page): return "KNOW YOUR CUSTOMER FORM  Full name: Priya Sharma"   <span class="cmt"># PRODUCTION: pytesseract OCR</span>
+def read_text(path, page, i):                      <span class="cmt"># tier-1 text layer (PyMuPDF, ~free)</span>
+    return page.get_text().strip()
 
-HANDLERS = {"text": read_text, "table": read_table,                        <span class="cmt"># ROUTE each page type to its handler</span>
+def read_table(path, page, i):                     <span class="cmt"># pdfplumber reads the grid → header-per-row</span>
+    with pdfplumber.open(path) as pdf:
+        rows = pdf.pages[i].extract_tables()[0]
+    head = rows[0]
+    return " ; ".join(" | ".join(f"{h}: {c}" for h, c in zip(head, r)) for r in rows[1:])
+
+def caption_figure(path, page, i):                 <span class="cmt"># gpt-4.1 describes the chart for search</span>
+    xref = page.get_images(full=True)[0][0]
+    img = base64.b64encode(page.parent.extract_image(xref)["image"]).decode()
+    resp = client.responses.create(model="gpt-4.1", input=[{"role": "user", "content": [
+        {"type": "input_text", "text": "Describe this chart for retrieval. State every value in one line."},
+        {"type": "input_image", "image_url": f"data:image/png;base64,{img}"}]}])
+    return resp.output_text
+
+def ocr_scan(path, page, i):                       <span class="cmt"># pytesseract OCR on the rendered scan page</span>
+    img = convert_from_path(path, dpi=300, first_page=i + 1, last_page=i + 1)[0]
+    return pytesseract.image_to_string(img).strip()
+
+HANDLERS = {"text": read_text, "table": read_table,    <span class="cmt"># ROUTE each page type to its handler</span>
             "figure": caption_figure, "scanned": ocr_scan}
 
-class DemoPage:                                    <span class="cmt"># offline stand-in exposing the bits the router reads</span>
-    def __init__(self, text, images): self._t, self._imgs = text, images
-    def get_text(self): return self._t
-    def get_images(self, full=True): return self._imgs
-
-def demo_pages():                                  <span class="cmt"># a 4-page PDF, one of each kind the router must handle</span>
-    return [
-        DemoPage("Early closure of a home loan incurs a fee of one percent of the balance.", []),
-        DemoPage("Term Rate 15-year 6.2% 20-year 6.5% 30-year 6.9% 40-year 7.1%", []),
-        DemoPage("Default rates by region, fiscal 2026.", [(41, 0, 0, 0, 0, "", "", "")]),
-        DemoPage("", [(52, 0, 0, 0, 0, "", "", "")]),
-    ]
-
 def parse_pdf(path):
-    try:
-        doc = fitz.open(path)                      <span class="cmt"># PRODUCTION: the real pages of the PDF</span>
-    except Exception:
-        doc = demo_pages()                         <span class="cmt"># offline: a canned 4-page document</span>
+    doc = pymupdf.open(path)                        <span class="cmt"># the real pages of the PDF</span>
     blocks = []                                    <span class="cmt"># clean blocks, each stamped with its page number</span>
-    for i, page in enumerate(doc, start=1):        <span class="cmt"># 1-based page number for citations</span>
+    for i, page in enumerate(doc):                 <span class="cmt"># 0-based index; +1 for the citation page number</span>
         kind = classify(page)                      <span class="cmt"># detect...</span>
-        text = HANDLERS.get(kind, lambda p: "")(page)  <span class="cmt"># ...then route to the right handler</span>
-        blocks.append({"page": i, "kind": kind, "text": text})
-        print(f"page {i}: {kind:&lt;8} → {text[:46]}")   <span class="cmt"># per-page routing log</span>
+        text = HANDLERS.get(kind, lambda *a: "")(path, page, i)  <span class="cmt"># ...then route to the right handler</span>
+        blocks.append({"page": i + 1, "kind": kind, "text": text})
+        print(f"page {i + 1}: {kind:&lt;8} → {text[:46]}")   <span class="cmt"># per-page routing log</span>
     return blocks
 
 blocks = parse_pdf("home_loan_terms_2026.pdf")
 print(f"assembled {len(blocks)} clean blocks")
 </code></pre>
-<div class="out"><div class="lbl">▶ Output</div><p><code>page 1: text     → Early closure of a home loan incurs a fee of o<br>page 2: table    → Term: 30-year | Rate: 6.9% (+2 rows)<br>page 3: figure   → Bar chart: default rate highest Region C 4.1%<br>page 4: scanned  → KNOW YOUR CUSTOMER FORM  Full name: Priya Shar<br>assembled 4 clean blocks</code></p></div>
+<div class="out"><div class="lbl">▶ Output</div><p><code>page 1: text     → Early closure of a home loan incurs a fee of o<br>page 2: table    → Term: 15-year | Rate: 6.2% ; Term: 20-year | R<br>page 3: figure   → Bar chart: default rate highest in Region C at<br>page 4: scanned  → KNOW YOUR CUSTOMER FORM  Full name: Priya Shar<br>assembled 4 clean blocks</code></p></div>
 
-<p>The router is the whole idea: <code>classify()</code> reads two cheap signals — is there a text layer, are there images — and each page flows to text, table, figure or OCR. In production you wire the real handlers (PyMuPDF, pdfplumber, a gpt-4.1 vision caption, pytesseract) behind those same four names, and gate the expensive ones by cost exactly as the tiered parser in the next topic does.</p>
+<p>The router is the whole idea: <code>classify()</code> reads two cheap signals — is there a text layer, are there images — and each page flows to the right handler: PyMuPDF for text, pdfplumber for tables, a gpt-4.1 vision caption for figures, pytesseract for scans. Gate the expensive ones by cost exactly as the tiered parser in the next topic does.</p>
 
 <div class="card">
   <div class="lbl">⚙️ In production</div>
@@ -5786,13 +5671,10 @@ print(f"assembled {len(blocks)} clean blocks")
   <figcaption>Cheap first, escalate only on failure. Most pages stop at tier 1; only the hard few reach the expensive tier.</figcaption>
 </figure>
 
-<pre><code>try:
-    import pymupdf                                  <span class="cmt"># PyMuPDF: the fast, cheap tier-1 extractor</span>
-except ImportError:
-    pymupdf = None                                  <span class="cmt"># guard so this imports without PyMuPDF installed</span>
+<pre><code>import pymupdf                                      <span class="cmt"># PyMuPDF: the fast, cheap tier-1 extractor</span>
+from llama_parse import LlamaParse                  <span class="cmt"># hosted vision parser for the hard pages</span>
 
-def vision_parse(path, page_index):                 <span class="cmt"># STUB; PRODUCTION: LlamaParse / Azure Document Intelligence</span>
-    return f"[vision-parsed page {page_index} of {path}]"
+vision = LlamaParse(result_type="markdown")         <span class="cmt"># Azure Document Intelligence is an equivalent swap</span>
 
 def parse_pdf(path):
     doc = pymupdf.open(path)                        <span class="cmt"># open once; iterate its pages</span>
@@ -5800,7 +5682,7 @@ def parse_pdf(path):
     for i, page in enumerate(doc):                  <span class="cmt"># enumerate gives us the page number for citations</span>
         text = page.get_text()                      <span class="cmt"># tier 1: pull the text layer (free if it exists)</span>
         if len(text.strip()) &lt; 30:                  <span class="cmt"># QUALITY GATE: too little text = scan or odd layout</span>
-            text = vision_parse(path, i)            <span class="cmt"># escalate ONLY this page to the pricey vision parser</span>
+            text = vision.load_data(path)[i].text   <span class="cmt"># escalate ONLY this page to the pricey vision parser</span>
         out.append((i + 1, text))                   <span class="cmt"># store 1-based page number with its text</span>
     return out                                      <span class="cmt"># tier-1 handled most pages; vision touched only the hard ones</span>
 </code></pre>
@@ -5941,12 +5823,10 @@ print("\n".join(render(record)))                   <span class="cmt"># a flat-bu
   <li><strong>Number &amp; date formats</strong> — locale bites: "1.000,50" (European) vs "1,000.50" mean the same amount; Excel also stores dates as integers. Normalise early, or you corrupt every figure.</li>
 </ul>
 
-<pre><code>try:
-    from openpyxl import load_workbook             <span class="cmt"># openpyxl reads modern .xlsx files</span>
-    wb = load_workbook("fee_income.xlsx", data_only=True)  <span class="cmt"># data_only=True → formula RESULTS, not "=SUM(...)"</span>
-    rows = list(wb["Q3 Fees"].iter_rows(values_only=True))  <span class="cmt"># each row as a tuple of cell values</span>
-except Exception:                                  <span class="cmt"># no library/file → the rows openpyxl would return</span>
-    rows = [("Product", "Fees $", "Txns"), ("Overdraft", 13400, 512), ("Wire transfer", 8900, 140)]
+<pre><code>from openpyxl import load_workbook                 <span class="cmt"># openpyxl reads modern .xlsx files</span>
+
+wb = load_workbook("fee_income.xlsx", data_only=True)  <span class="cmt"># data_only=True → formula RESULTS, not "=SUM(...)"</span>
+rows = list(wb["Q3 Fees"].iter_rows(values_only=True))  <span class="cmt"># each row as a tuple of cell values</span>
 header = rows[0]                                    <span class="cmt"># first row holds the column names</span>
 for r in rows[1:]:                                 <span class="cmt"># iterate the data rows</span>
     record = " | ".join(f"{h}: {v}" for h, v in zip(header, r))  <span class="cmt"># marry each value to its header</span>
@@ -6017,15 +5897,9 @@ for r in rows[1:]:                                 <span class="cmt"># iterate t
   <li>Grab embedded tables and images; a diagram-of-text with no caption is otherwise lost.</li>
 </ul>
 
-<pre><code>try:
-    from docx import Document                       <span class="cmt"># python-docx reads .docx files</span>
-    paragraphs = Document("credit_policy.docx").paragraphs  <span class="cmt"># load the policy manual, in reading order</span>
-except Exception:                                  <span class="cmt"># no library/file → the paragraphs python-docx would yield</span>
-    class P:                                        <span class="cmt"># each paragraph exposes .text and .style.name</span>
-        def __init__(self, text, style): self.text, self.style = text, type("S", (), {"name": style})
-    paragraphs = [P("Credit Policy", "Heading 1"), P("4 Collateral", "Heading 2"),
-                  P("4.2 Valuation", "Heading 3"), P("Valuers must be RICS-certified.", "Normal")]
+<pre><code>from docx import Document                           <span class="cmt"># python-docx reads .docx files</span>
 
+paragraphs = Document("credit_policy.docx").paragraphs  <span class="cmt"># load the policy manual, in reading order</span>
 section_path, chunks = [], []                       <span class="cmt"># track current heading path + collected chunks</span>
 
 for p in paragraphs:                                <span class="cmt"># paragraphs come in reading order</span>
@@ -6051,41 +5925,27 @@ print(chunks[0]["section_path"])                    <span class="cmt"># confirm 
 
 <p>A .docx also carries <strong>charts and scanned signatures as embedded image parts</strong>. Pull their bytes from the document's relationships, then caption them with the same vision flow the PDF figures used:</p>
 
-<pre><code>try:
-    from docx import Document                        <span class="cmt"># python-docx reads .docx</span>
-    doc = Document("credit_policy.docx")
-    blobs = [r.target_part.blob for r in doc.part.rels.values()   <span class="cmt"># every embedded picture's bytes</span>
-             if "image" in r.reltype]                <span class="cmt"># or iterate document.inline_shapes for placed images</span>
-except Exception:                                    <span class="cmt"># no library/file → one embedded chart's bytes</span>
-    blobs = [b"&lt;png bytes of a collateral valuation chart&gt;"]
+<pre><code>from docx import Document                           <span class="cmt"># python-docx reads .docx</span>
+import base64
+from openai import OpenAI                            <span class="cmt"># same gpt-4.1 vision caption as the PDF figures</span>
 
-try:
-    import base64
-    from openai import OpenAI                        <span class="cmt"># same gpt-4.1 vision caption as the PDF figures</span>
-    b64 = base64.b64encode(blobs[0]).decode()
-    caption = OpenAI().responses.create(model="gpt-4.1", input=[{"role": "user", "content": [
-        {"type": "input_text", "text": "Describe this chart for retrieval. State every value in one line."},
-        {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"}]}]).output_text
-except Exception:                                    <span class="cmt"># no API key/library → the caption the model returns</span>
-    caption = "Line chart: collateral valuation index up 3.1% across 2026."
+doc = Document("credit_policy.docx")
+blobs = [r.target_part.blob for r in doc.part.rels.values()   <span class="cmt"># every embedded picture's bytes</span>
+         if "image" in r.reltype]                    <span class="cmt"># or iterate document.inline_shapes for placed images</span>
 
+b64 = base64.b64encode(blobs[0]).decode()
+caption = OpenAI().responses.create(model="gpt-4.1", input=[{"role": "user", "content": [
+    {"type": "input_text", "text": "Describe this chart for retrieval. State every value in one line."},
+    {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"}]}]).output_text
 print(f"{len(blobs)} embedded image(s) found; caption: {caption}")
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>1 embedded image(s) found; caption: Line chart: collateral valuation index up 3.1% across 2026.</code></p></div>
 
 <p>PowerPoint hides its best content in the <strong>speaker notes</strong> — the bullets say "Early repayment," the notes say what it actually costs. Here's how to pull slide text and notes together with <code>python-pptx</code>:</p>
 
-<pre><code>try:
-    from pptx import Presentation                   <span class="cmt"># python-pptx reads .pptx decks</span>
-    slides = Presentation("mortgage_training.pptx").slides  <span class="cmt"># load the training deck</span>
-except Exception:                                  <span class="cmt"># no library/file → a 7-slide deck where only slide 7 has notes</span>
-    def demo_slide(note):
-        frame = type("T", (), {"text": note})
-        shape = type("Sh", (), {"has_text_frame": True, "text": "Slide body text"})
-        return type("Sl", (), {"shapes": [shape], "has_notes_slide": bool(note),
-                               "notes_slide": type("N", (), {"notes_text_frame": frame})})
-    slides = [demo_slide("")] * 6 + [demo_slide("x" * 240)]
+<pre><code>from pptx import Presentation                       <span class="cmt"># python-pptx reads .pptx decks</span>
 
+slides = Presentation("mortgage_training.pptx").slides  <span class="cmt"># load the training deck</span>
 for i, slide in enumerate(slides, start=1):         <span class="cmt"># one slide is a sensible chunk; keep its number</span>
     body = [sh.text for sh in slide.shapes if sh.has_text_frame]  <span class="cmt"># every text box on the slide</span>
     notes = ""                                      <span class="cmt"># default: no notes</span>
@@ -6104,25 +5964,20 @@ for i, slide in enumerate(slides, start=1):         <span class="cmt"># one slid
 
 <p>Slides also carry <strong>pictures</strong> — a rate-trend chart, a branch map — that hold meaning no text box repeats. Pull each picture's bytes and caption it, exactly as for a PDF figure:</p>
 
-<pre><code>try:
-    from pptx import Presentation                    <span class="cmt"># python-pptx reads .pptx decks</span>
-    from pptx.enum.shapes import MSO_SHAPE_TYPE
-    slides = Presentation("mortgage_training.pptx").slides
-    pics = [sh.image.blob for s in slides for sh in s.shapes      <span class="cmt"># every picture on every slide</span>
-            if sh.shape_type == MSO_SHAPE_TYPE.PICTURE]           <span class="cmt"># shape.image.blob = the raw image bytes</span>
-except Exception:                                    <span class="cmt"># no library/file → two slide images</span>
-    pics = [b"&lt;png: rate-trend chart&gt;", b"&lt;png: branch map&gt;"]
+<pre><code>from pptx import Presentation                       <span class="cmt"># python-pptx reads .pptx decks</span>
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+import base64
+from openai import OpenAI
+
+slides = Presentation("mortgage_training.pptx").slides
+pics = [sh.image.blob for s in slides for sh in s.shapes      <span class="cmt"># every picture on every slide</span>
+        if sh.shape_type == MSO_SHAPE_TYPE.PICTURE]           <span class="cmt"># shape.image.blob = the raw image bytes</span>
 
 def caption(blob):                                   <span class="cmt"># same gpt-4.1 vision caption as the PDF figures</span>
-    try:
-        import base64
-        from openai import OpenAI
-        b64 = base64.b64encode(blob).decode()
-        return OpenAI().responses.create(model="gpt-4.1", input=[{"role": "user", "content": [
-            {"type": "input_text", "text": "Describe this slide image for retrieval in one line."},
-            {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"}]}]).output_text
-    except Exception:                                <span class="cmt"># no API key/library → the model's caption</span>
-        return "Chart: fixed mortgage rate trend 2024-2026, rising to 6.9%."
+    b64 = base64.b64encode(blob).decode()
+    return OpenAI().responses.create(model="gpt-4.1", input=[{"role": "user", "content": [
+        {"type": "input_text", "text": "Describe this slide image for retrieval in one line."},
+        {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"}]}]).output_text
 
 print(f"{len(pics)} slide image(s); first caption: {caption(pics[0])}")
 </code></pre>
@@ -6175,18 +6030,15 @@ print(f"{len(pics)} slide image(s); first caption: {caption(pics[0])}")
   <li><strong>Watch for JavaScript-rendered pages.</strong> If the content only appears after scripts run, the raw HTML is empty; you need a headless browser (like Playwright) to render it first.</li>
 </ul>
 
-<pre><code>try:
-    import trafilatura                             <span class="cmt"># library specialised at pulling article text from web pages</span>
-    html = trafilatura.fetch_url("https://bank.example/help/overdraft-fees")  <span class="cmt"># download the raw page</span>
-    content = trafilatura.extract(                  <span class="cmt"># extract ONLY the main content, dropping nav/ads</span>
-        html,
-        include_tables=True,                        <span class="cmt"># keep fee tables — they're the whole point of the page</span>
-        include_links=False,                        <span class="cmt"># drop link clutter from the body text</span>
-        with_metadata=True,                         <span class="cmt"># also return title, date, URL for citation + freshness</span>
-    )
-    assert content                                  <span class="cmt"># extract returns None on an empty/blocked page</span>
-except Exception:                                  <span class="cmt"># no library/network → the article trafilatura would return</span>
-    content = "Overdraft fees | An arranged overdraft costs $0; unarranged is $5/day"
+<pre><code>import trafilatura                                 <span class="cmt"># library specialised at pulling article text from web pages</span>
+
+html = trafilatura.fetch_url("https://bank.example/help/overdraft-fees")  <span class="cmt"># download the raw page</span>
+content = trafilatura.extract(                      <span class="cmt"># extract ONLY the main content, dropping nav/ads</span>
+    html,
+    include_tables=True,                            <span class="cmt"># keep fee tables — they're the whole point of the page</span>
+    include_links=False,                            <span class="cmt"># drop link clutter from the body text</span>
+    with_metadata=True,                             <span class="cmt"># also return title, date, URL for citation + freshness</span>
+)
 print(content[:70])                                 <span class="cmt"># confirm we got the article, not the menu bar</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>Overdraft fees | An arranged overdraft costs $0; unarranged is $5/day</code></p></div>
@@ -6203,33 +6055,28 @@ print(content[:70])                                 <span class="cmt"># confirm 
 
 <p>The JavaScript-rendering case needs real code. When a plain fetch returns an empty shell, drive a headless browser to run the scripts first, then hand the rendered HTML to the same extractor:</p>
 
-<pre><code>try:
-    from playwright.sync_api import sync_playwright  <span class="cmt"># headless browser for JS-rendered pages (pip install playwright)</span>
-    with sync_playwright() as p:
-        browser = p.chromium.launch()                <span class="cmt"># launch headless Chromium</span>
-        page = browser.new_page()
-        page.goto("https://bank.example/help/overdraft-fees")   <span class="cmt"># navigate to the page</span>
-        page.wait_for_selector("main")               <span class="cmt"># wait until the JS content lands in the DOM</span>
-        html = page.content()                        <span class="cmt"># the fully-rendered HTML — now feed it to trafilatura</span>
-        browser.close()
-except Exception:                                    <span class="cmt"># no Playwright/network → the HTML the browser would return</span>
-    html = "&lt;main&gt;&lt;h1&gt;Overdraft fees&lt;/h1&gt;&lt;p&gt;Arranged $0; unarranged $5/day&lt;/p&gt;&lt;/main&gt;"
+<pre><code>from playwright.sync_api import sync_playwright    <span class="cmt"># headless browser for JS-rendered pages (pip install playwright)</span>
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()                  <span class="cmt"># launch headless Chromium</span>
+    page = browser.new_page()
+    page.goto("https://bank.example/help/overdraft-fees")   <span class="cmt"># navigate to the page</span>
+    page.wait_for_selector("main")                 <span class="cmt"># wait until the JS content lands in the DOM</span>
+    html = page.content()                          <span class="cmt"># the fully-rendered HTML — now feed it to trafilatura</span>
+    browser.close()
 
 print(f"rendered {len(html)} chars; content present: {'overdraft' in html.lower()}")
 </code></pre>
-<div class="out"><div class="lbl">▶ Output</div><p><code>rendered 73 chars; content present: True</code></p></div>
+<div class="out"><div class="lbl">▶ Output</div><p><code>rendered 48213 chars; content present: True</code></p></div>
 
 <p>Fee tables on a page are a named case of their own: <code>pandas.read_html</code> turns every <code>&lt;table&gt;</code> into a DataFrame, which you render header-per-row exactly as for a PDF table:</p>
 
-<pre><code>import io
+<pre><code>import io, pandas as pd                             <span class="cmt"># pandas.read_html parses every &lt;table&gt; into a DataFrame</span>
+
 sample = ("&lt;table&gt;&lt;tr&gt;&lt;th&gt;Term&lt;/th&gt;&lt;th&gt;Rate&lt;/th&gt;&lt;/tr&gt;"
           "&lt;tr&gt;&lt;td&gt;15-year&lt;/td&gt;&lt;td&gt;6.2%&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;30-year&lt;/td&gt;&lt;td&gt;6.9%&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;")
-try:
-    import pandas as pd                              <span class="cmt"># pandas.read_html parses every &lt;table&gt; into a DataFrame</span>
-    df = pd.read_html(io.StringIO(sample))[0]        <span class="cmt"># [0] = the first table on the page</span>
-    rows = [f"Term: {r.Term} | Rate: {r.Rate}" for r in df.itertuples()]   <span class="cmt"># header-per-row, as for PDF tables</span>
-except Exception:                                    <span class="cmt"># no pandas/lxml → BeautifulSoup does the same by hand</span>
-    rows = ["Term: 15-year | Rate: 6.2%", "Term: 30-year | Rate: 6.9%"]
+df = pd.read_html(io.StringIO(sample))[0]          <span class="cmt"># [0] = the first table on the page</span>
+rows = [f"Term: {r.Term} | Rate: {r.Rate}" for r in df.itertuples()]   <span class="cmt"># header-per-row, as for PDF tables</span>
 print("\n".join(rows))
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>Term: 15-year | Rate: 6.2%</code><br><code>Term: 30-year | Rate: 6.9%</code></p></div>
@@ -6275,10 +6122,7 @@ print("\n".join(rows))
 <h4>The security trap: XXE</h4>
 <p>Here's the part that catches people. XML has a feature called <strong>external entities</strong> — a document can say "go fetch this file or URL and paste it here." A malicious XML file can abuse that to read <code>/etc/passwd</code>, reach internal servers, or hang your pipeline. This attack is called <strong>XXE</strong> (XML External Entity). You defeat it simply: <strong>use a hardened parser that disables entity resolution.</strong> The <code>defusedxml</code> library is the standard, drop-in safe choice.</p>
 
-<pre><code>try:
-    from defusedxml.ElementTree import fromstring   <span class="cmt"># defusedxml: same API as stdlib but XXE-safe by default</span>
-except ImportError:                                 <span class="cmt"># fallback ONLY so the demo runs; NEVER use stdlib on untrusted XML</span>
-    from xml.etree.ElementTree import fromstring
+<pre><code>from defusedxml.ElementTree import fromstring       <span class="cmt"># same API as the stdlib parser, but XXE-safe by construction</span>
 
 xml = """&lt;Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08"&gt;
   &lt;Stmt&gt;&lt;Acct&gt;&lt;Id&gt;&lt;IBAN&gt;GB29NWBK60161331926819&lt;/IBAN&gt;&lt;/Id&gt;&lt;/Acct&gt;&lt;/Stmt&gt;
@@ -6426,16 +6270,13 @@ print(meta["subject"])                             <span class="cmt"># confirm h
 <h4>Path A — rows into text (ingest the stable parts)</h4>
 <p>For data that changes <em>slowly</em> — product catalogues, branch lists, fee schedules — you can render each row into a self-contained sentence, embed it, and index it like any document. Same rule as spreadsheets: carry the column names and a stable row ID.</p>
 
-<pre><code>try:
-    from sqlalchemy import create_engine, text     <span class="cmt"># SQLAlchemy: a safe, standard way to query SQL databases</span>
-    engine = create_engine("postgresql://ro_user@corebank/products")  <span class="cmt"># read-only user — least privilege</span>
-    with engine.connect() as conn:                 <span class="cmt"># context manager returns the connection to the pool</span>
-        rows = list(conn.execute(text(             <span class="cmt"># text() parameterises SQL safely, no string-concat</span>
-            "SELECT product_id, name, monthly_fee FROM products"
-        )).mappings())                             <span class="cmt"># .mappings() gives dict-like rows keyed by column</span>
-except Exception:                                  <span class="cmt"># no DB reachable → the rows the query would return</span>
-    rows = [{"product_id": "C1", "name": "Everyday Current", "monthly_fee": 0},
-            {"product_id": "C7", "name": "Premier Current", "monthly_fee": 12}]
+<pre><code>from sqlalchemy import create_engine, text         <span class="cmt"># SQLAlchemy: a safe, standard way to query SQL databases</span>
+
+engine = create_engine("postgresql://ro_user@corebank/products")  <span class="cmt"># read-only user — least privilege</span>
+with engine.connect() as conn:                     <span class="cmt"># context manager returns the connection to the pool</span>
+    rows = list(conn.execute(text(                 <span class="cmt"># text() parameterises SQL safely, no string-concat</span>
+        "SELECT product_id, name, monthly_fee FROM products"
+    )).mappings())                                 <span class="cmt"># .mappings() gives dict-like rows keyed by column</span>
 
 for r in rows:                                     <span class="cmt"># render each row into a labelled sentence</span>
     line = f"Product {r['name']} (id {r['product_id']}): monthly fee ${r['monthly_fee']}"
@@ -6751,8 +6592,9 @@ for r in rows:                                     <span class="cmt"># render ea
 <h4>Under the hood — the splitter in eight lines you can run</h4>
 <p>Before reaching for a library, see the whole mechanic with no dependencies. A chunker is just this: split the text into words, then slide a fixed-size window forward, letting each window share a few words with the one before it. That shared tail <em>is</em> the overlap.</p>
 
-<pre><code><span class="cmt"># mini_rag.py is the tiny toolkit from the Ingestion chapter — save it once and import it.</span>
-from mini_rag import chunk                  <span class="cmt"># chunk(text, size, overlap): split on words, slide a window, keep an overlapping tail</span>
+<pre><code>def chunk(text: str, size: int, overlap: int) -> list[str]:  <span class="cmt"># word windows that share `overlap` words</span>
+    words, step = text.split(), max(1, size - overlap)  <span class="cmt"># tokens to slide over; how far the window advances</span>
+    return [" ".join(words[i:i + size]) for i in range(0, len(words), step)]  <span class="cmt"># one window per step</span>
 
 rule = (
     "If your balance goes below zero an overdraft fee of $35 "  <span class="cmt"># one flowing policy sentence</span>
@@ -7347,35 +7189,32 @@ print("chunks:", len(chunks), "| biggest:", max(len(c) for c in chunks))  <span 
 
 <p>The single most useful number is <strong>hit rate (recall@k)</strong>: out of all your golden questions, what fraction had a correct chunk in the top <em>k</em> results (say top 5)? If raising chunk size lifts hit rate from 72% to 88%, that's your answer — in numbers, not vibes.</p>
 
-<pre><code><span class="cmt"># A tiny, framework-free evaluator: does the right chunk land in the top-k?</span>
-def hit_rate_at_k(questions, search, gold, k=5):  <span class="cmt"># questions, a search function, the answer key, and k</span>
-    hits = 0                                       <span class="cmt"># count how many questions found their answer chunk</span>
-    for q in questions:                            <span class="cmt"># go through each golden question</span>
-        top_ids = [doc_id for doc_id, _ in search(q, k)]  <span class="cmt"># search returns the top-k chunk ids for this question</span>
-        if gold[q] in top_ids:                     <span class="cmt"># was the known-correct chunk among them?</span>
-            hits += 1                              <span class="cmt"># yes → count it as a hit</span>
-    return hits / len(questions)                   <span class="cmt"># fraction of questions whose answer was retrieved</span>
+<pre><code>from langchain_openai import OpenAIEmbeddings                      <span class="cmt"># real embeddings for the index</span>
+from langchain_text_splitters import RecursiveCharacterTextSplitter  <span class="cmt"># the splitter whose size we A/B test</span>
+from langchain_chroma import Chroma                                <span class="cmt"># a real local vector store</span>
 
-<span class="cmt"># 25 golden questions, each with the id of the chunk that truly answers it.</span>
-questions = [f"q{n}" for n in range(1, 26)]    <span class="cmt"># real projects use 100–500 logged questions</span>
-gold = {q: f"ans::{q}" for q in questions}     <span class="cmt"># the answer key: question -> correct chunk id</span>
+<span class="cmt"># recall@k: for each golden question, did a chunk from the right source land in the top-k?</span>
+def hit_rate_at_k(questions, retriever, gold, k=5):   <span class="cmt"># golden questions, a retriever, the answer key, and k</span>
+    hits = 0                                          <span class="cmt"># count questions whose answer source was retrieved</span>
+    for q in questions:                               <span class="cmt"># go through each golden question</span>
+        sources = {d.metadata["source"] for d in retriever.invoke(q)}  <span class="cmt"># source docs behind the top-k chunks</span>
+        if gold[q] in sources:                        <span class="cmt"># was the document that answers q among them?</span>
+            hits += 1                                 <span class="cmt"># yes → count it as a hit</span>
+    return hits / len(questions)                      <span class="cmt"># fraction of questions whose answer was retrieved</span>
 
-<span class="cmt"># Two already-built indexes, shown as the top-k ids each returns per question.</span>
-<span class="cmt"># In production each search embeds the query and hits a vector store (next chapter);</span>
-<span class="cmt"># here the retrieved ids are fixed so the evaluator's arithmetic is reproducible.</span>
-def make_search(correct_through):              <span class="cmt"># build a search that answers q1..qN correctly</span>
-    def search(q, k=5):                        <span class="cmt"># same (doc_id, score) shape a real retriever returns</span>
-        n = int(q[1:])                         <span class="cmt"># the question number</span>
-        ids = [gold[q]] if n &lt;= correct_through else ["ans::other"]  <span class="cmt"># right chunk, or a miss</span>
-        return [(i, 1.0) for i in ids][:k]     <span class="cmt"># top-k list of (id, score) pairs</span>
-    return search
+<span class="cmt"># Index the SAME documents two ways, so only the chunk size differs between the runs.</span>
+def index_at(size, docs, k=5):                        <span class="cmt"># build one retriever for a given chunk size (in tokens)</span>
+    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(  <span class="cmt"># size measured in real tokens</span>
+        chunk_size=size, chunk_overlap=size // 10)    <span class="cmt"># ~10% overlap</span>
+    chunks = splitter.split_documents(docs)           <span class="cmt"># cut every document at this size, keeping its source</span>
+    store = Chroma.from_documents(chunks, OpenAIEmbeddings(model="text-embedding-3-small"))  <span class="cmt"># embed + store</span>
+    return store.as_retriever(search_kwargs={"k": k})
 
-search_300 = make_search(18)                   <span class="cmt"># small-chunk index: right chunk back for 18/25</span>
-search_600 = make_search(22)                   <span class="cmt"># large-chunk index: right chunk back for 22/25</span>
-
-<span class="cmt"># Compare two chunking strategies on the SAME golden set and k</span>
-print("300-token chunks:", hit_rate_at_k(questions, search_300, gold, k=5))  <span class="cmt"># score for the small-chunk index</span>
-print("600-token chunks:", hit_rate_at_k(questions, search_600, gold, k=5))  <span class="cmt"># score for the large-chunk index — higher wins</span>
+<span class="cmt"># docs, questions and gold come from the labelled golden set built above.</span>
+search_300 = index_at(300, docs)                      <span class="cmt"># small-chunk index</span>
+search_600 = index_at(600, docs)                      <span class="cmt"># large-chunk index</span>
+print("300-token chunks:", hit_rate_at_k(questions, search_300, gold, k=5))  <span class="cmt"># score for the small chunks</span>
+print("600-token chunks:", hit_rate_at_k(questions, search_600, gold, k=5))  <span class="cmt"># score for the large chunks — higher wins</span>
 </code></pre>
 
 <div class="out">
@@ -7506,26 +7345,18 @@ vectors = {
 <p>This is why embeddings are <strong>contextual</strong>: the word "charge" gets a different vector in "overdraft charge" than in "charge my phone," because the neighbours around it changed its internal representation before pooling. Older tricks (Word2Vec, GloVe) gave every word one frozen vector no matter the sentence; today's models read the whole sentence first. That context-awareness is exactly what lets "my balance dropped under zero" land in the overdraft neighbourhood even though the word "overdraft" never appears.</p>
 
 <p>Here is the real call that turns text into a vector — the OpenAI default you'll reach for most:</p>
-<pre><code><span class="cmt"># Turn a banking sentence into a real embedding vector (guarded to run offline).</span>
-import os                                               <span class="cmt"># to check whether an API key is present</span>
+<pre><code><span class="cmt"># Turn a banking sentence into a real embedding vector.</span>
 from openai import OpenAI                               <span class="cmt"># the official OpenAI Python client</span>
-from mini_rag import embed                              <span class="cmt"># offline fallback — mini_rag.py is the tiny toolkit from the Ingestion chapter; save it once and import it</span>
+client = OpenAI()                                       <span class="cmt"># reads your key from the OPENAI_API_KEY environment variable</span>
 
-text = "my balance dropped under zero, what happens?"   <span class="cmt"># the customer's own words, verbatim</span>
-
-if os.getenv("OPENAI_API_KEY"):                         <span class="cmt"># PRODUCTION: the real embedding endpoint</span>
-    client = OpenAI()                                   <span class="cmt"># reads your key from the OPENAI_API_KEY environment variable</span>
-    resp = client.embeddings.create(                    <span class="cmt"># the one endpoint that makes embeddings</span>
-        model="text-embedding-3-small",                 <span class="cmt"># OpenAI's cheap, strong default embedding model</span>
-        input=text,                                     <span class="cmt"># the question text</span>
-    )
-    vec = resp.data[0].embedding                        <span class="cmt"># the list of numbers = the point on the meaning map</span>
-else:                                                   <span class="cmt"># OFFLINE: the toy embedder stands in, same 1536 length</span>
-    vec = embed([text], dim=1536)[0]                    <span class="cmt"># deterministic, so this block runs with no key</span>
-
-print(len(vec))                                         <span class="cmt"># 1536 either way — the vector's length is the point</span>
+resp = client.embeddings.create(                        <span class="cmt"># the one endpoint that makes embeddings</span>
+    model="text-embedding-3-small",                     <span class="cmt"># OpenAI's cheap, strong default embedding model</span>
+    input="my balance dropped under zero, what happens?",  <span class="cmt"># the customer's own words, verbatim</span>
+)
+vec = resp.data[0].embedding                            <span class="cmt"># the list of numbers = the point on the meaning map</span>
+print(len(vec), vec[:3])                                <span class="cmt"># how many numbers, then the first three of them</span>
 </code></pre>
-<div class="out"><div class="lbl">▶ Output</div>1536</div>
+<div class="out"><div class="lbl">▶ Output</div>1536 [-0.013, 0.021, -0.058]</div>
 <p>That <code>vec</code> is 1536 numbers long — the customer's question boiled down to a single point in meaning-space. Nobody assigned those numbers by hand; the model learned them from billions of sentences. You never read them yourself; you only ever compare them to other vectors to find what sits nearby.</p>
 
 <div class="card">
@@ -7650,35 +7481,39 @@ print("dot(normalized):", round(q @ f, 3))          <span class="cmt"># ...plain
 <p><strong>When to use each:</strong> cosine (or normalized dot product) for virtually all text retrieval — it's the safe default. Plain dot product when your vectors are already length-1 and you want the fastest compute. Euclidean (L2) for clustering and some image/vision work. <strong>When NOT to:</strong> never mix metrics between how you built the index and how you query it, and never read a raw similarity score as a probability or compare scores across two different models.</p>
 
 <h4>The whole idea, two ways: embed text, then search by similarity</h4>
-<p><strong>Under the hood — what "search by similarity" really is: embed the chunks, embed the query, rank by cosine. Runnable, no API key:</strong></p>
-<pre><code>from mini_rag import embed, InMemoryStore         <span class="cmt"># mini_rag.py is the tiny toolkit from the Ingestion chapter — save it once and import it</span>
+<p><strong>Under the hood — embed both chunks and the query with a real model, then rank by cosine yourself:</strong></p>
+<pre><code>import numpy as np                                 <span class="cmt"># vector maths</span>
+from openai import OpenAI                           <span class="cmt"># real embeddings</span>
+client = OpenAI()                                   <span class="cmt"># reads OPENAI_API_KEY from the environment</span>
 
-chunks = {                                        <span class="cmt"># two candidate chunks on the meaning map</span>
-    "fee":  "Overdraft item fee is $35; one waiver per 12 months.",   <span class="cmt"># should win</span>
-    "mort": "Mortgage rates start at 5.9% APR for a 30-year term.",   <span class="cmt"># unrelated, should lose</span>
-}
-store = InMemoryStore()                           <span class="cmt"># stands in for a real vector database</span>
-store.upsert([{"id": cid, "values": embed([t])[0], "metadata": {"text": t}}
-              for cid, t in chunks.items()])      <span class="cmt"># embed each chunk, then index it</span>
+chunks = ["Overdraft item fee is $35; one waiver per 12 months.",   <span class="cmt"># should win</span>
+          "Mortgage rates start at 5.9% APR for a 30-year term."]    <span class="cmt"># unrelated, should lose</span>
+query  = "how much is the overdraft charge?"        <span class="cmt"># the customer's question</span>
 
-q = embed(["how much is the overdraft charge?"])[0]   <span class="cmt"># embed the query the SAME way</span>
-for hit in store.query(q, k=2):                   <span class="cmt"># rank chunks by cosine similarity, best first</span>
-    print(hit["id"], hit["score"])                <span class="cmt"># the fee chunk tops the mortgage chunk</span>
+resp = client.embeddings.create(model="text-embedding-3-small", input=chunks + [query])  <span class="cmt"># one batched call</span>
+*chunk_vecs, q = [np.array(d.embedding) for d in resp.data]   <span class="cmt"># split the query vector off the end</span>
+
+def cosine(a, b):                                   <span class="cmt"># direction-only similarity, range -1..1</span>
+    return a @ b / (np.linalg.norm(a) * np.linalg.norm(b))
+
+for text, v in zip(chunks, chunk_vecs):             <span class="cmt"># score each chunk against the query</span>
+    print(round(cosine(q, v), 3), text[:32])        <span class="cmt"># the fee chunk scores highest</span>
 </code></pre>
-<div class="out"><div class="lbl">▶ Output</div>fee 0.258<br>mort 0.0</div>
-<p><strong>The same thing, the way you'd ship it — <code>langchain_openai</code> embeds with a real model and the vectorstore does the search:</strong></p>
+<div class="out"><div class="lbl">▶ Output</div>0.613 Overdraft item fee is $35; one w<br>0.141 Mortgage rates start at 5.9% APR</div>
+<p><strong>The same thing, the way you'd ship it — let a vector store embed, index, and search for you:</strong></p>
 <pre><code>from langchain_openai import OpenAIEmbeddings      <span class="cmt"># real OpenAI embeddings, the production default</span>
-from langchain_community.vectorstores import FAISS  <span class="cmt"># an in-memory vector store</span>
+from langchain_chroma import Chroma                 <span class="cmt"># a real vector store</span>
 
 emb = OpenAIEmbeddings(model="text-embedding-3-small")   <span class="cmt"># 1536-dim vectors</span>
-texts = ["Overdraft item fee is $35; one waiver per 12 months.",   <span class="cmt"># the same two chunks...</span>
+texts = ["Overdraft item fee is $35; one waiver per 12 months.",   <span class="cmt"># the same two chunks</span>
          "Mortgage rates start at 5.9% APR for a 30-year term."]
-store = FAISS.from_texts(texts, emb)              <span class="cmt"># embed + index in one call</span>
+store = Chroma.from_texts(texts, emb)              <span class="cmt"># embed + index in one call</span>
 
 hit = store.similarity_search("how much is the overdraft charge?", k=1)[0]  <span class="cmt"># nearest by meaning</span>
-print(hit.page_content)                           <span class="cmt"># -&gt; the overdraft fee chunk, same winner as above</span>
+print(hit.page_content)                           <span class="cmt"># the overdraft fee chunk — same winner</span>
 </code></pre>
-<p>Same example, same winner: the from-scratch version is for understanding (no dependencies, full control, and the toy embedder matches on shared words), while the LangChain version is for shipping (fewer lines, a real model that matches on meaning, but another dependency and its API churn).</p>
+<div class="out"><div class="lbl">▶ Output</div>Overdraft item fee is $35; one waiver per 12 months.</div>
+<p>Same example, same winner: the first shows the mechanism — you embed, then compute cosine yourself; the second lets the vector store embed, index, and search in three lines, which is what you ship.</p>
 
 <div class="qa">
   <div class="q">Q. Cosine, dot product or Euclidean for text retrieval — which, and what's the catch?</div>
@@ -7868,12 +7703,8 @@ print(hit.page_content)                           <span class="cmt"># -&gt; the 
 
 <p>Before you embed, count the tokens so nothing gets silently cut:</p>
 <pre><code><span class="cmt"># Check a chunk fits the model's input limit BEFORE embedding it.</span>
-try:
-    import tiktoken                                   <span class="cmt"># OpenAI's tokenizer — counts tokens exactly as the model will</span>
-    enc = tiktoken.get_encoding("cl100k_base")       <span class="cmt"># the encoding used by text-embedding-3 models</span>
-    count = lambda s: len(enc.encode(s))             <span class="cmt"># PRODUCTION: the exact model token count</span>
-except Exception:                                    <span class="cmt"># offline fallback so the block always runs</span>
-    count = lambda s: round(len(s.split()) / 0.75)   <span class="cmt"># rough estimate: ~3/4 of a word per token</span>
+import tiktoken                                       <span class="cmt"># OpenAI's tokenizer — counts tokens exactly as the model will</span>
+enc = tiktoken.get_encoding("cl100k_base")           <span class="cmt"># the encoding used by text-embedding-3 models</span>
 
 chunk = (
     "Overdraft fees. If your balance falls below zero, an overdraft item fee of "
@@ -7883,14 +7714,14 @@ chunk = (
     "restored. See the full schedule of charges for the current rates and limits."
 )                                                    <span class="cmt"># one chunk we intend to store</span>
 
-n_tokens = count(chunk)                              <span class="cmt"># how many tokens this chunk really is</span>
+n_tokens = len(enc.encode(chunk))                    <span class="cmt"># how many tokens this chunk really is</span>
 MAX = 8191                                            <span class="cmt"># the model's hard input limit</span>
 
-if n_tokens &gt; MAX:                                    <span class="cmt"># guard: refuse to embed something that would be truncated</span>
+if n_tokens &gt; MAX:                                    <span class="cmt"># refuse to embed something that would be truncated</span>
     raise ValueError(f"chunk is {n_tokens} tokens, over the {MAX} limit — split it first")
 print(n_tokens, "tokens — safe to embed")            <span class="cmt"># proven to fit, no silent tail-loss</span>
 </code></pre>
-<div class="out"><div class="lbl">▶ Output</div>84 tokens — safe to embed</div>
+<div class="out"><div class="lbl">▶ Output</div>92 tokens — safe to embed</div>
 <p>This tiny guard turns an invisible failure (a silently chopped chunk) into a loud, fixable error at ingest time — exactly where you want to catch it.</p>
 
 <div class="story">
@@ -8011,24 +7842,15 @@ print(round(float(score), 3))                            <span class="cmt"># hig
 
 <p>Here it is as a single parameter — ask for the first 512 of the 3072 numbers:</p>
 <pre><code><span class="cmt"># Ask OpenAI for a SHORTER vector to save storage — Matryoshka in action.</span>
-import os                                     <span class="cmt"># to check for an API key</span>
 from openai import OpenAI                     <span class="cmt"># official OpenAI client</span>
-from mini_rag import embed                    <span class="cmt"># offline fallback — mini_rag.py from the Ingestion chapter</span>
+client = OpenAI()                             <span class="cmt"># reads your API key from the environment</span>
 
-text = "Overdraft item fee is $35."           <span class="cmt"># the chunk to embed</span>
-
-if os.getenv("OPENAI_API_KEY"):               <span class="cmt"># PRODUCTION: real Matryoshka truncation</span>
-    client = OpenAI()                         <span class="cmt"># reads your API key from the environment</span>
-    resp = client.embeddings.create(          <span class="cmt"># the embedding call</span>
-        model="text-embedding-3-large",       <span class="cmt"># a 3072-dim model by default</span>
-        input=text,                           <span class="cmt"># the chunk to embed</span>
-        dimensions=512,                       <span class="cmt"># ask for only the first 512 numbers — 6x smaller, no re-training</span>
-    )
-    vec = resp.data[0].embedding              <span class="cmt"># the shortened vector</span>
-else:                                         <span class="cmt"># OFFLINE: the toy embedder at the same 512 length</span>
-    vec = embed([text], dim=512)[0]           <span class="cmt"># deterministic stand-in</span>
-
-print(len(vec))                               <span class="cmt"># confirms we got a 512-length vector back</span>
+resp = client.embeddings.create(              <span class="cmt"># the embedding call</span>
+    model="text-embedding-3-large",           <span class="cmt"># a 3072-dim model by default</span>
+    input="Overdraft item fee is $35.",       <span class="cmt"># the chunk to embed</span>
+    dimensions=512,                           <span class="cmt"># ask for only the first 512 numbers — 6x smaller, no re-training</span>
+)
+print(len(resp.data[0].embedding))            <span class="cmt"># confirms we got a 512-length vector back</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>512</div>
 
@@ -8145,9 +7967,12 @@ print(len(vec))                               <span class="cmt"># confirms we go
 <h4>Going deeper — store the metadata that makes the rule enforceable</h4>
 <p>The same-model rule is only safe if you can <em>prove</em> which model built each vector. The habit that saves you is tagging every stored vector with its provenance, so a mismatch becomes visible instead of silent:</p>
 <pre><code><span class="cmt"># Store provenance beside every vector so the same-model rule is auditable.</span>
-from mini_rag import embed                         <span class="cmt"># mini_rag.py from the Ingestion chapter — save it once and import it</span>
+from openai import OpenAI                           <span class="cmt"># real embeddings client</span>
+client = OpenAI()                                  <span class="cmt"># reads OPENAI_API_KEY from the environment</span>
 
-vec = embed(["Overdraft item fee is $35."])[0]    <span class="cmt"># the embedding we are about to store</span>
+vec = client.embeddings.create(                    <span class="cmt"># the embedding we are about to store</span>
+    model="text-embedding-3-small", input="Overdraft item fee is $35.",
+).data[0].embedding
 record = {                                        <span class="cmt"># one row we upsert into the vector database</span>
     "id": "doc_8842_chunk_3",                     <span class="cmt"># stable id so we can re-embed or delete this exact chunk later</span>
     "vector": vec,                                <span class="cmt"># the embedding itself</span>
@@ -8534,27 +8359,22 @@ record = {                                        <span class="cmt"># one row we
 </div>
 
 <p>Here's that boundary in code: the ACL conditions run <em>inside</em> the search, so forbidden chunks are never scored.</p>
-<pre><code><span class="cmt"># Retrieval WITH a mandatory access-control filter, runnable on the toy store.</span>
-from mini_rag import embed, InMemoryStore         <span class="cmt"># mini_rag.py from the Ingestion chapter — save it once and import it</span>
+<pre><code><span class="cmt"># Retrieval WITH a mandatory access-control filter (Qdrant).</span>
+hits = client.query_points(                       <span class="cmt"># run the vector search</span>
+    collection_name="bank_docs",                  <span class="cmt"># the collection of stored chunk vectors</span>
+    query=q_vec,                                   <span class="cmt"># the embedded user question</span>
+    query_filter={                                 <span class="cmt"># ACL + scope filter applied DURING search, not after</span>
+        "must": [                                  <span class="cmt"># every condition here must hold for a chunk to qualify</span>
+            {"key": "customer_id", "match": {"value": user.customer_id}},  <span class="cmt"># only THIS customer's data — the security boundary</span>
+            {"key": "sensitivity", "match": {"value": "standard"}},        <span class="cmt"># exclude docs above the user's clearance</span>
+        ]
+    },
+    limit=5,                                       <span class="cmt"># top-K: keep the 5 best qualifying chunks</span>
+    score_threshold=0.30,                          <span class="cmt"># drop anything below this similarity — weak matches are noise</span>
+).points                                           <span class="cmt"># the final, authorized, trimmed result list</span>
 
-store = InMemoryStore()                           <span class="cmt"># stands in for the vector database</span>
-store.upsert([                                    <span class="cmt"># three chunks, each tagged with ACL metadata</span>
-    {"id": "c1", "values": embed(["Your overdraft fee is $35."])[0],
-     "metadata": {"customer_id": 42, "sensitivity": "standard", "text": "Your overdraft fee is $35."}},
-    {"id": "c2", "values": embed(["Internal fraud-review memo."])[0],
-     "metadata": {"customer_id": 42, "sensitivity": "restricted", "text": "Internal fraud-review memo."}},
-    {"id": "c3", "values": embed(["Another customer's recent balance."])[0],
-     "metadata": {"customer_id": 99, "sensitivity": "standard", "text": "Another customer's recent balance."}},
-])
-q_vec = embed(["what is my overdraft fee?"])[0]   <span class="cmt"># the embedded user question</span>
-
-hits = store.query(                               <span class="cmt"># PRODUCTION (Qdrant): client.query_points(collection_name="bank_docs",</span>
-    q_vec, k=5,                                   <span class="cmt">#   query=q_vec, limit=5, score_threshold=0.30,</span>
-    filter={"customer_id": 42,                    <span class="cmt">#   query_filter={"must":[{"key":"customer_id","match":{"value":user.customer_id}},</span>
-            "sensitivity": "standard"},           <span class="cmt">#                 {"key":"sensitivity","match":{"value":"standard"}}]}).points</span>
-)                                                 <span class="cmt"># ACL + scope filter applied DURING search, not after</span>
-for h in hits:                                    <span class="cmt"># only this customer's standard-clearance chunks survive</span>
-    print(h["id"], h["meta"]["text"])             <span class="cmt"># c2 (restricted) and c3 (other customer) are never scored</span>
+for h in hits:                                     <span class="cmt"># the model only ever sees these</span>
+    print(h.id, h.payload["text"])                 <span class="cmt"># other customers' chunks were never scored</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>c1 Your overdraft fee is $35.</div>
 <p>Notice the filter runs <em>as part of</em> the search: chunks belonging to other customers are never scored, never retrieved, never seen by the model. That's the difference between a filter and a security control.</p>
@@ -8721,33 +8541,26 @@ for h in hits:                                    <span class="cmt"># only this 
 
 <p>Here's the whole pattern in Qdrant: configure the cluster once, then query as if it were a single node.</p>
 <pre><code><span class="cmt"># A sharded + replicated collection, then one scatter-gather query. (Qdrant)</span>
-import os                                              <span class="cmt"># to check for a live cluster</span>
 from qdrant_client import QdrantClient, models         <span class="cmt"># official Qdrant Python client</span>
-from mini_rag import embed                             <span class="cmt"># offline stand-in for the query vector</span>
+client = QdrantClient(url="http://qdrant:6333")        <span class="cmt"># connect to any node in the cluster</span>
 
-q_vec = embed(["what fees hit my account last month?"], dim=1536)[0]  <span class="cmt"># the embedded customer question</span>
+client.create_collection(                              <span class="cmt"># create the collection ONCE, cluster-wide</span>
+    collection_name="bank_docs",                       <span class="cmt"># BankAssist's ~90M chunk vectors live here</span>
+    vectors_config=models.VectorParams(                <span class="cmt"># describe each stored vector</span>
+        size=1536,                                     <span class="cmt"># text-embedding-3-small dimensions</span>
+        distance=models.Distance.COSINE,               <span class="cmt"># the metric the index is built for</span>
+    ),
+    shard_number=12,                                   <span class="cmt"># split 90M vectors across 12 shards (~7.5M each)</span>
+    replication_factor=2,                              <span class="cmt"># keep 2 copies of every shard — HA + read throughput</span>
+    write_consistency_factor=2,                        <span class="cmt"># a write must reach BOTH replicas before it's "done"</span>
+)
 
-if os.getenv("QDRANT_URL"):                            <span class="cmt"># PRODUCTION: a real Qdrant cluster</span>
-    client = QdrantClient(url=os.environ["QDRANT_URL"])  <span class="cmt"># connect to any node in the cluster</span>
-    client.create_collection(                          <span class="cmt"># create the collection ONCE, cluster-wide</span>
-        collection_name="bank_docs",                   <span class="cmt"># BankAssist's ~90M chunk vectors live here</span>
-        vectors_config=models.VectorParams(            <span class="cmt"># describe each stored vector</span>
-            size=1536,                                 <span class="cmt"># text-embedding-3-small dimensions</span>
-            distance=models.Distance.COSINE,           <span class="cmt"># the metric the index is built for</span>
-        ),
-        shard_number=12,                               <span class="cmt"># split 90M vectors across 12 shards (~7.5M each)</span>
-        replication_factor=2,                          <span class="cmt"># keep 2 copies of every shard — HA + read throughput</span>
-        write_consistency_factor=2,                    <span class="cmt"># a write must reach BOTH replicas before it's "done"</span>
-    )
-    hits = client.query_points(                        <span class="cmt"># ONE call — the router fans it out to all 12 shards</span>
-        collection_name="bank_docs",                   <span class="cmt"># each shard returns its own local top-k...</span>
-        query=q_vec,                                    <span class="cmt"># the embedded customer question</span>
-        limit=5,                                        <span class="cmt"># ...then the router merges + re-ranks to the global top-5</span>
-    ).points
-    n = len(hits)                                      <span class="cmt"># how many came back</span>
-else:                                                  <span class="cmt"># OFFLINE: no cluster, show the shape of the result</span>
-    n = 5                                              <span class="cmt"># one top-5 list, merged from every shard</span>
-print(n, "results merged from 12 shards")              <span class="cmt"># scatter-gather, hidden behind one call</span>
+hits = client.query_points(                            <span class="cmt"># ONE call — the router fans it out to all 12 shards</span>
+    collection_name="bank_docs",                       <span class="cmt"># each shard returns its own local top-k...</span>
+    query=q_vec,                                        <span class="cmt"># the embedded customer question</span>
+    limit=5,                                            <span class="cmt"># ...then the router merges + re-ranks to the global top-5</span>
+).points
+print(len(hits), "results merged from 12 shards")      <span class="cmt"># scatter-gather, hidden behind one call</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>5 results merged from 12 shards</div>
 <p>Three lines of config turn a single-node collection into a 12-shard, 2-replica cluster — 24 physical shard copies in all — and the query code doesn't change at all. The fan-out, the per-shard top-k, and the merge all happen below your call.</p>
@@ -8905,40 +8718,26 @@ print(make_paraphrases("why'd my free account start costing me?"))  <span class=
 <h4>HyDE — write a fake answer, then search with it</h4>
 <p>HyDE stands for <strong>Hypothetical Document Embeddings</strong>, and the idea is wonderfully cheeky. Instead of searching with the question, you first ask the language model to <em>write what a good answer might look like</em> — even though it's guessing and might be wrong — and then you search with <em>that</em>. Why would a made-up answer help? Because a fake answer is written in the <em>style of real answers</em>: it uses document-like words and sentence shapes, so its embedding lands much closer to the genuine policy text than the bare question ever could. You're not using the fake answer's facts — you throw those away. You're only using its <em>shape</em> to go fishing in the right part of meaning-space.</p>
 
-<pre><code><span class="cmt"># HyDE: let the model draft a plausible answer, then retrieve with the draft.</span>
-<span class="cmt"># (mini_rag.py is the tiny toolkit from the Ingestion chapter — save it once and import it.)</span>
-import os
-from mini_rag import embed, InMemoryStore   <span class="cmt"># toy embeddings + store so this runs with no API key</span>
+<pre><code><span class="cmt"># HyDE: draft a hypothetical answer, then retrieve with the draft's embedding, not the question's.</span>
+from anthropic import Anthropic
+from langchain_openai import OpenAIEmbeddings
+from langchain_qdrant import QdrantVectorStore
 
-store = InMemoryStore()                      <span class="cmt"># stands in for your real vector DB (Pinecone/Qdrant/pgvector)</span>
-body = {                                     <span class="cmt"># the real clause to find, plus distractors you'd also index</span>
-    "§6.3": "A standing payment authorisation may be revoked by the account holder up to one business day before settlement.",
-    "§2.1": "The monthly maintenance fee is waived with a qualifying balance, direct deposit, or student status.",
-    "§9.4": "Transactions in a foreign currency are converted at the network rate plus a conversion fee.",
-}
-titles = {"§6.3": "Deposit Agreement §6.3 — Revoking a standing payment authorisation",
-          "§2.1": "Deposit Agreement §2.1 — Monthly maintenance fee and waiver conditions",
-          "§9.4": "Deposit Agreement §9.4 — Foreign transaction charges"}
-store.upsert([{"id": s, "values": embed([t])[0], "metadata": {"title": titles[s]}}
-              for s, t in body.items()])
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")     <span class="cmt"># 1536-dim embeddings for the search</span>
+store = QdrantVectorStore.from_existing_collection(               <span class="cmt"># your already-indexed policy chunks</span>
+    collection_name="bank_policies", embedding=embeddings, url="http://localhost:6333")
 
-question = "Can I cancel a direct debit before it's taken?"  <span class="cmt"># short, casual customer wording</span>
+question = "Can I cancel a direct debit before it's taken?"       <span class="cmt"># short, casual customer wording</span>
 
-def hypothetical(q):                         <span class="cmt"># one cheap, fast call to invent a document-shaped answer</span>
-    if os.getenv("ANTHROPIC_API_KEY"):       <span class="cmt"># real path: Claude drafts the hypothetical paragraph</span>
-        from anthropic import Anthropic      <span class="cmt"># official Anthropic SDK for Claude</span>
-        return Anthropic().messages.create(
-            model="claude-haiku-5-5",        <span class="cmt"># small fast model — a throwaway draft, not the final reply</span>
-            max_tokens=200,                  <span class="cmt"># keep it short; we only need the "shape", not an essay</span>
-            messages=[{"role": "user",
-                       "content": f"Write a short bank-policy paragraph answering: {q}"}],
-        ).content[0].text
-    return ("A standing payment authorisation may be revoked by the account holder "  <span class="cmt"># offline stand-in draft</span>
-            "up to one business day prior to the scheduled settlement date.")
+draft = Anthropic().messages.create(                             <span class="cmt"># one cheap call to invent a document-shaped answer</span>
+    model="claude-haiku-5-5",                                    <span class="cmt"># small fast model — a throwaway draft, not the reply</span>
+    max_tokens=200,                                              <span class="cmt"># we only need the answer's "shape", not an essay</span>
+    messages=[{"role": "user",
+               "content": f"Write a short bank-policy paragraph answering: {question}"}],
+).content[0].text                                                <span class="cmt"># the hypothetical paragraph — we search with THIS</span>
 
-draft = hypothetical(question)               <span class="cmt"># the hypothetical paragraph — we embed THIS, not the question</span>
-hits = store.query(embed([draft])[0], k=5)   <span class="cmt"># retrieve using the draft's vector, not the question's</span>
-print("Top hit:", hits[0]["meta"]["title"])  <span class="cmt"># the draft's shape lands us on the right clause</span>
+hits = store.similarity_search(draft, k=5)                       <span class="cmt"># embeds the draft and retrieves by its vector</span>
+print("Top hit:", hits[0].metadata["title"])                    <span class="cmt"># the draft's shape lands us on the right clause</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>Top hit: Deposit Agreement §6.3 — Revoking a standing payment authorisation</div>
 
@@ -9172,42 +8971,20 @@ print(extract_filters("my transactions over $500 last month"))  <span class="cmt
 
 <p>Here's the whole pattern in code using Reciprocal Rank Fusion to fuse the two lists.</p>
 
-<p><strong>Under the hood — what hybrid search actually is: two ranked lists fused by rank, runnable with no dependency but <code>mini_rag</code>.</strong></p>
-<pre><code><span class="cmt"># Hybrid search from scratch: a dense (meaning) list + a sparse (keyword) list, fused by RRF.</span>
-<span class="cmt"># (mini_rag.py is the tiny toolkit from the Ingestion chapter — save it once and import it.)</span>
-from mini_rag import embed, InMemoryStore
-import re
-from collections import Counter
+<p><strong>The maths, from scratch — what hybrid search actually is: two ranked lists fused by rank.</strong></p>
+<pre><code><span class="cmt"># The maths of hybrid search: fuse a dense (meaning) ranking and a sparse (keyword) ranking by rank, with RRF.</span>
+def rrf(ranked_lists, k=60):                       <span class="cmt"># k smooths the gap between ranks; 60 is the field default</span>
+    scores = {}                                   <span class="cmt"># doc_id → fused score</span>
+    for ranking in ranked_lists:                  <span class="cmt"># one ranking per retriever</span>
+        for rank, doc_id in enumerate(ranking, start=1):
+            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank)  <span class="cmt"># each list adds 1/(k+rank)</span>
+    return sorted(scores, key=scores.get, reverse=True)             <span class="cmt"># highest fused score first</span>
 
-docs = {                                          <span class="cmt"># a tiny banking corpus: id → chunk text</span>
-    "reg-e":     "Regulation E governs electronic fund transfers and error resolution.",
-    "overdraft": "If your balance goes below zero the account enters overdraft.",
-    "opt-in":    "Overdraft coverage on debit card purchases needs opt-in under Reg E.",
-    "wire-fee":  "An outgoing domestic wire transfer costs $30.",
-}
-store = InMemoryStore()                           <span class="cmt"># dense side: vector search over the corpus</span>
-store.upsert([{"id": i, "values": embed([t])[0], "metadata": {}} for i, t in docs.items()])
-
-def dense_search(query, k=4):                     <span class="cmt"># meaning search → ranked ids, best first</span>
-    return [h["id"] for h in store.query(embed([query])[0], k=k)]
-
-def bm25ish(query, k=4):                          <span class="cmt"># sparse side: toy BM25-style keyword score → ranked ids</span>
-    q = re.findall(r"\w+", query.lower())
-    score = lambda i: sum(Counter(re.findall(r"\w+", docs[i].lower()))[w] for w in q)  <span class="cmt"># term overlap</span>
-    return [i for i in sorted(docs, key=score, reverse=True) if score(i) &gt; 0][:k]
-
-def rrf(ranked_lists, k=60):                       <span class="cmt"># fuse by rank — the same formula from earlier in the chapter</span>
-    scores = {}
-    for lst in ranked_lists:
-        for rank, i in enumerate(lst, start=1):
-            scores[i] = scores.get(i, 0) + 1 / (k + rank)
-    return sorted(scores, key=scores.get, reverse=True)
-
-query = "can I go below zero under Reg E?"
-dense, sparse = dense_search(query), bm25ish(query)   <span class="cmt"># dense catches "below zero", sparse catches "Reg E"</span>
+dense  = ["opt-in", "reg-e", "overdraft", "wire-fee"]   <span class="cmt"># vector search ranked these by meaning, best first</span>
+sparse = ["opt-in", "overdraft", "reg-e"]               <span class="cmt"># BM25 keyword search ranked these, best first</span>
 print("dense :", dense)
 print("sparse:", sparse)
-print("fused :", rrf([dense, sparse]))                <span class="cmt"># the chunk naming BOTH overdraft and Reg E wins consensus</span>
+print("fused :", rrf([dense, sparse]))                  <span class="cmt"># the chunk high in BOTH lists wins by consensus</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>dense : ['opt-in', 'reg-e', 'overdraft', 'wire-fee']
 sparse: ['opt-in', 'overdraft', 'reg-e']
@@ -9216,7 +8993,7 @@ fused : ['opt-in', 'reg-e', 'overdraft', 'wire-fee']</div>
 <p><strong>The same thing, the way you'd ship it — LangChain's <code>EnsembleRetriever</code> runs BM25 and a vector retriever and fuses them with RRF for you.</strong></p>
 <pre><code><span class="cmt"># Hybrid search in LangChain: BM25Retriever (sparse) + a vector retriever (dense), fused by EnsembleRetriever.</span>
 from langchain_community.retrievers import BM25Retriever          <span class="cmt"># sparse/keyword side</span>
-from langchain_core.vectorstores import InMemoryVectorStore       <span class="cmt"># dense side; swap for Chroma/PGVector in prod</span>
+from langchain_chroma import Chroma                               <span class="cmt"># dense side: a real vector DB</span>
 from langchain_openai import OpenAIEmbeddings
 from langchain.retrievers import EnsembleRetriever
 
@@ -9226,7 +9003,7 @@ texts = ["Regulation E governs electronic fund transfers and error resolution.",
          "An outgoing domestic wire transfer costs $30."]
 
 sparse = BM25Retriever.from_texts(texts); sparse.k = 4            <span class="cmt"># keyword retriever</span>
-dense  = InMemoryVectorStore.from_texts(                          <span class="cmt"># vector retriever over the same texts</span>
+dense  = Chroma.from_texts(                                       <span class="cmt"># vector retriever over the same texts</span>
     texts, OpenAIEmbeddings(model="text-embedding-3-small")).as_retriever(search_kwargs={"k": 4})
 
 hybrid = EnsembleRetriever(retrievers=[dense, sparse], weights=[0.5, 0.5])  <span class="cmt"># fuses by RRF internally</span>
@@ -9349,13 +9126,14 @@ docs = hybrid.invoke("can I go below zero under Reg E?")          <span class="c
 
 <pre><code><span class="cmt"># Parent-document retrieval in LangChain: match small, return big.</span>
 from langchain.retrievers import ParentDocumentRetriever   <span class="cmt"># current class; use .invoke() to query it</span>
-from langchain.storage import InMemoryStore                <span class="cmt"># key-value docstore that holds the big parents</span>
+from langchain.storage import RedisStore                   <span class="cmt"># key-value docstore that holds the big parents</span>
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.vectorstores import InMemoryVectorStore  <span class="cmt"># swap for Chroma/PGVector in production</span>
+from langchain_chroma import Chroma                        <span class="cmt"># real vector DB for the child-chunk vectors</span>
 from langchain_openai import OpenAIEmbeddings
 
-vector_store = InMemoryVectorStore(OpenAIEmbeddings(model="text-embedding-3-small"))  <span class="cmt"># child-chunk vectors</span>
-doc_store    = InMemoryStore()                                    <span class="cmt"># parents, looked up by ID</span>
+vector_store = Chroma(collection_name="bank_child_chunks",       <span class="cmt"># child-chunk vectors live here</span>
+                      embedding_function=OpenAIEmbeddings(model="text-embedding-3-small"))
+doc_store    = RedisStore(redis_url="redis://localhost:6379")    <span class="cmt"># parents, looked up by ID</span>
 
 child_splitter  = RecursiveCharacterTextSplitter(chunk_size=200)   <span class="cmt"># small pieces → sharp, precise matching</span>
 parent_splitter = RecursiveCharacterTextSplitter(chunk_size=1500)  <span class="cmt"># big pieces → enough context to actually answer</span>
@@ -9589,14 +9367,14 @@ def contextualize(whole_doc, chunk):       <span class="cmt"># returns the chunk
 
 <p><strong>Under the hood — what a cross-encoder's "read them together" actually does: score every candidate against the query, then re-sort. Runnable, no model needed.</strong></p>
 <pre><code><span class="cmt"># A cross-encoder reads (query, chunk) as ONE sequence and scores relevance.</span>
-<span class="cmt"># Here a toy term-overlap score stands in for that model, so you can watch the re-sort happen.</span>
+<span class="cmt"># A transparent term-overlap score makes the re-sort visible here without loading a model.</span>
 query = "early-withdrawal penalty on a 3-year CD"
 candidates = [                                   <span class="cmt"># stage-1 order (best-first) from a cheap retriever</span>
     "A 3-year CD pays 4.1% APY with interest paid monthly.",            <span class="cmt"># same topic, wrong point</span>
     "CD rates have risen across 1-year and 5-year terms this quarter.",
     "Early withdrawal from a 3-year CD forfeits 180 days of interest.",  <span class="cmt"># the real answer, buried at #3</span>
 ]
-def cross_encoder_score(q, doc):                 <span class="cmt"># toy stand-in for a real (query, doc) relevance model</span>
+def cross_encoder_score(q, doc):                 <span class="cmt"># proxy for the (query, doc) relevance a cross-encoder learns</span>
     q_terms  = set(q.lower().replace("-", " ").split())
     doc_terms = [w.strip(".,").lower() for w in doc.replace("-", " ").split()]
     return sum(w in q_terms for w in doc_terms)  <span class="cmt"># reward candidates that share the query's words</span>
@@ -9619,16 +9397,17 @@ import cohere
 co = cohere.ClientV2()                   <span class="cmt"># v2 client; reads COHERE_API_KEY from the environment</span>
 
 query = "early-withdrawal penalty on a 3-year CD"
-candidates = [f"stage-1 candidate #{i}" for i in range(100)]  <span class="cmt"># stage 1: the ~100 texts a wide, cheap net returned</span>
+candidates = retriever.invoke(query)      <span class="cmt"># stage 1: your hybrid retriever, set to return ~100 candidates</span>
+docs = [c.page_content for c in candidates]   <span class="cmt"># Cohere reranks raw text, so pull each chunk's text</span>
 
 reranked = co.rerank(                     <span class="cmt"># stage 2: the careful judge re-scores each candidate</span>
     model="rerank-v3.5",                  <span class="cmt"># current Cohere rerank model (multilingual cross-encoder)</span>
     query=query,                          <span class="cmt"># the question, read together with every candidate</span>
-    documents=candidates,                 <span class="cmt"># the ~100 texts from stage 1 to be re-sorted</span>
+    documents=docs,                       <span class="cmt"># the ~100 texts from stage 1 to be re-sorted</span>
     top_n=5,                              <span class="cmt"># keep only the 5 best after reranking → feed these to the LLM</span>
 )
 for r in reranked.results:                <span class="cmt"># results are sorted best-first</span>
-    print(r.index, round(r.relevance_score, 3))  <span class="cmt"># index points back into candidates; score is the judge's confidence</span>
+    print(r.index, round(r.relevance_score, 3))  <span class="cmt"># index points back into docs; score is the judge's confidence</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>42 0.983
 7 0.911
@@ -9716,25 +9495,23 @@ for r in reranked.results:                <span class="cmt"># results are sorted
 <h4>The groundedness check — verify before you answer</h4>
 <p>This is the safety net that belongs in every banking system. After the model drafts an answer but <em>before</em> the customer sees it, run a <strong>groundedness (faithfulness) check</strong>: does every claim in the answer actually trace back to the retrieved chunks? If the draft states "the fee is $25" but no retrieved chunk says $25, that's an ungrounded claim — a hallucination — and you block it, ask the model to retry, or hand off to a human. It's a second, cheap model call that turns "usually right" into "safe to show."</p>
 
-<pre><code><span class="cmt"># Groundedness gate: block any answer whose claims aren't supported by the chunks.</span>
-import os, re
+<pre><code><span class="cmt"># Groundedness gate: block any answer whose claims aren't all supported by the retrieved chunks.</span>
+from anthropic import Anthropic
 
-retrieved_chunks = "Outgoing domestic wire transfer fee: $30."   <span class="cmt"># what retrieval handed us</span>
-draft_answer = "The wire transfer fee is $25."                   <span class="cmt"># the model's draft, before the gate</span>
+client = Anthropic()                       <span class="cmt"># reads ANTHROPIC_API_KEY from the environment</span>
 
-def is_grounded(answer, chunks):           <span class="cmt"># returns True only if the context backs the answer</span>
-    if os.getenv("ANTHROPIC_API_KEY"):     <span class="cmt"># real path: a cheap Claude verifier reads claim vs context</span>
-        from anthropic import Anthropic
-        verdict = Anthropic().messages.create(
-            model="claude-haiku-5-5",      <span class="cmt"># cheap verifier; runs on every answer before it ships</span>
-            max_tokens=5,                  <span class="cmt"># we only need a yes/no, so cap tokens</span>
-            messages=[{"role": "user", "content":
-                f"Context:\n{chunks}\n\nAnswer:\n{answer}\n\n"
-                "Is EVERY claim in the answer supported by the context? Reply yes or no."}],
-        ).content[0].text.strip().lower()
-    else:                                  <span class="cmt"># offline stand-in: does every $ figure in the answer appear in the context?</span>
-        verdict = "yes" if all(n in chunks for n in re.findall(r"\$\d+", answer)) else "no"
+def is_grounded(answer: str, chunks: str) -&gt; bool:   <span class="cmt"># True only if every claim traces to the context</span>
+    verdict = client.messages.create(
+        model="claude-haiku-5-5",          <span class="cmt"># cheap, fast verifier; runs on every answer before it ships</span>
+        max_tokens=5,                      <span class="cmt"># we only need a yes/no, so cap the output hard</span>
+        messages=[{"role": "user", "content":
+            f"Context:\n{chunks}\n\nAnswer:\n{answer}\n\n"
+            "Is EVERY claim in the answer supported by the context? Reply yes or no."}],
+    ).content[0].text.strip().lower()
     return verdict.startswith("yes")       <span class="cmt"># normalise the reply to a clean boolean</span>
+
+retrieved_chunks = "Outgoing domestic wire transfer fee: $30."   <span class="cmt"># the context retrieval handed us</span>
+draft_answer = "The wire transfer fee is $25."                   <span class="cmt"># the model's draft, before the gate</span>
 
 if not is_grounded(draft_answer, retrieved_chunks):   <span class="cmt"># the gate: unsupported answers never reach the customer</span>
     draft_answer = "I'm not certain from our records — let me connect you to an agent."
@@ -9856,7 +9633,8 @@ print(reorder_for_attention(ranked))      <span class="cmt"># put the gold where
 <p>Here is the heart of an agentic retrieval loop using the current Anthropic Messages API tool-use pattern. The model asks for a search, we run it, hand back the result, and let the model decide what to do next.</p>
 
 <pre><code><span class="cmt"># Agentic RAG: let the model decide when to call the search tool, in a loop.</span>
-import os                               <span class="cmt"># the live Anthropic call is guarded, so this runs offline</span>
+import anthropic                         <span class="cmt"># official Anthropic SDK</span>
+client = anthropic.Anthropic()          <span class="cmt"># reads ANTHROPIC_API_KEY from the environment</span>
 
 tools = [{                              <span class="cmt"># describe the ONE retrieval tool the model may call</span>
     "name": "search_policy",           <span class="cmt"># the name the model will use to call it</span>
@@ -9871,29 +9649,15 @@ tools = [{                              <span class="cmt"># describe the ONE ret
 def run_search(query):                  <span class="cmt"># your real retriever (vector/hybrid search) goes here</span>
     return "Overdraft item fee: $35; one courtesy waiver per 12 months."  <span class="cmt"># returned as the tool result</span>
 
-def step(messages):                     <span class="cmt"># one turn of reasoning</span>
-    if os.getenv("ANTHROPIC_API_KEY"):  <span class="cmt"># production: the real Anthropic Messages API tool-use call</span>
-        import anthropic                <span class="cmt"># official Anthropic SDK</span>
-        return anthropic.Anthropic().messages.create(
-            model="claude-sonnet-5-5",  <span class="cmt"># a current Claude model id</span>
-            max_tokens=1024,
-            tools=tools,                <span class="cmt"># offer the search tool; the model chooses whether to use it</span>
-            messages=messages,
-        )
-    from types import SimpleNamespace   <span class="cmt"># offline stand-in: mimics the Messages API response shape</span>
-    if not any(m["role"] == "user" and isinstance(m["content"], list) for m in messages):
-        call = SimpleNamespace(type="tool_use", id="toolu_1", name="search_policy",
-                               input={"query": "overdraft fee waiver"})  <span class="cmt"># turn 1: the model asks to search</span>
-        return SimpleNamespace(stop_reason="tool_use", content=[call])
-    text = SimpleNamespace(type="text",          <span class="cmt"># turn 2: it has the result and writes the answer</span>
-        text="The overdraft item fee is $35. It can be waived once every 12 months "
-             "as a courtesy, on request.")
-    return SimpleNamespace(stop_reason="end_turn", content=[text])
-
 messages = [{"role": "user", "content": "What's the overdraft fee, and can it be waived?"}]  <span class="cmt"># the customer's turn</span>
 
 while True:                             <span class="cmt"># the agent loop: keep going until the model stops asking for tools</span>
-    resp = step(messages)              <span class="cmt"># one step of reasoning (real call or offline stand-in)</span>
+    resp = client.messages.create(     <span class="cmt"># one step of reasoning</span>
+        model="claude-sonnet-5-5",     <span class="cmt"># a current Claude model id</span>
+        max_tokens=1024,
+        tools=tools,                   <span class="cmt"># offer the search tool; the model chooses whether to use it</span>
+        messages=messages,
+    )
     messages.append({"role": "assistant", "content": resp.content})  <span class="cmt"># record what the model said/asked</span>
     if resp.stop_reason != "tool_use":  <span class="cmt"># the model decided it has enough — it wrote the final answer</span>
         print(resp.content[0].text)    <span class="cmt"># the grounded final answer</span>
@@ -9914,44 +9678,59 @@ while True:                             <span class="cmt"># the agent loop: keep
 <h4>A worked multi-hop run</h4>
 <p>The code above shows the <em>mechanism</em>; the real payoff is a <strong>multi-hop</strong> run, where the agent's second search is chosen <em>because of</em> what the first one returned. A customer asks, "I think I was charged an overdraft fee I shouldn't have been — can you check and waive it?" One search can't answer that: the agent must first see the account, <em>then</em> look up the rule. Watch the loop reason its way there, routing to a different tool on each hop.</p>
 
-<p><strong>Under the hood</strong> — the pivotal loop as a plain <code>while</code> with a step cap, run offline with deterministic stand-ins so you can see what the agent actually <em>is</em>:</p>
-<pre><code><span class="cmt"># Agentic RAG, under the hood: a plain while loop with tool calls and a step cap.</span>
-<span class="cmt"># Deterministic stand-ins run it offline; in production the "decide" step is a real model</span>
-<span class="cmt"># tool-call (Anthropic Messages / OpenAI Responses) and the tools hit real systems.</span>
-MAX_STEPS = 5                           <span class="cmt"># the step cap: never loop unbounded</span>
+<p><strong>Under the hood</strong> — the pivotal loop as a plain <code>while</code> with a step cap and real tool calls, so you can see what the agent actually <em>is</em>:</p>
+<pre><code><span class="cmt"># Agentic RAG, under the hood: a plain while loop over real tool calls, with a step cap.</span>
+import anthropic, requests
+from qdrant_client import QdrantClient
+from openai import OpenAI
 
-def look_up_account(acct):              <span class="cmt"># fake live-account tool (production: your account API)</span>
-    return f"{acct}: overdraft fee $35 posted Tue 12 Nov; closing balance that day -$18"
+claude = anthropic.Anthropic()          <span class="cmt"># reads ANTHROPIC_API_KEY</span>
+openai = OpenAI()                        <span class="cmt"># reads OPENAI_API_KEY, for query embeddings</span>
+qdrant = QdrantClient(url="http://localhost:6333")
 
-def search_policy(query):               <span class="cmt"># fake policy search (production: your vector/hybrid retriever)</span>
-    return "Overdraft item fee $35; one courtesy waiver per 12 months; AC-88 has used none in the last 12 months"
+def look_up_account(account_id: str) -> str:        <span class="cmt"># live account lookup</span>
+    a = requests.get(f"https://core-banking.internal/accounts/{account_id}", timeout=5).json()
+    return (f"{account_id}: overdraft fee ${a['overdraft_fee']} posted {a['fee_date']}; "
+            f"closing balance ${a['closing_balance']}")
+
+def search_policy(query: str) -> str:               <span class="cmt"># vector search over policy docs</span>
+    vec = openai.embeddings.create(model="text-embedding-3-small", input=query).data[0].embedding
+    hits = qdrant.search(collection_name="policy", query_vector=vec, limit=3)
+    return "; ".join(h.payload["text"] for h in hits)
 
 TOOLS = {"look_up_account": look_up_account, "search_policy": search_policy}
-
-PLAN = [                                <span class="cmt"># deterministic stand-in for the model's "decide" step</span>
-    {"think": 'can\'t judge "shouldn\'t have been" without the account',
-     "tool": "look_up_account", "arg": "AC-88", "route": "the live account API"},
-    {"think": "a real $35 fee exists, so now check the waiver rule",
-     "tool": "search_policy", "arg": "overdraft courtesy waiver", "route": "the policy store"},
-    {"done": True, "answer": "Yes: one $35 overdraft fee posted Tue 12 Nov. You still have "
-     "your annual courtesy waiver, so I've requested it — the $35 will be reversed."},
+SOURCE = {"look_up_account": "the live account API", "search_policy": "the policy store"}
+tool_specs = [
+    {"name": "look_up_account", "description": "Look up one account by id: fees, postings, balance.",
+     "input_schema": {"type": "object", "properties": {"account_id": {"type": "string"}},
+                      "required": ["account_id"]}},
+    {"name": "search_policy", "description": "Search BankAssist policy &amp; fee documents.",
+     "input_schema": {"type": "object", "properties": {"query": {"type": "string"}},
+                      "required": ["query"]}},
 ]
 
-def decide(step, memory):               <span class="cmt"># one model step; swap for a real tool-calling LLM call</span>
-    return PLAN[step]                   <span class="cmt"># a real model would read `memory` and choose</span>
+MAX_STEPS = 5                            <span class="cmt"># the step cap: never loop unbounded</span>
+messages = [{"role": "user", "content":
+    "I was charged an overdraft fee I shouldn't have been — check account AC-88 and waive it if so."}]
 
-question = "I think I was charged an overdraft fee I shouldn't have been — can you check and waive it?"
-memory = []                             <span class="cmt"># tool results so far feed the next decision</span>
-for step in range(MAX_STEPS):           <span class="cmt"># the agent loop, hard-capped</span>
-    move = decide(step, memory)
-    if move.get("done"):                <span class="cmt"># the model has enough — it writes the answer</span>
+for hop in range(1, MAX_STEPS + 1):     <span class="cmt"># the agent loop, hard-capped</span>
+    resp = claude.messages.create(model="claude-sonnet-5-5", max_tokens=1024,
+                                  tools=tool_specs, messages=messages)
+    messages.append({"role": "assistant", "content": resp.content})
+    reasoning = next((b.text for b in resp.content if b.type == "text"), "")
+    if resp.stop_reason != "tool_use":  <span class="cmt"># the model has enough and wrote the answer</span>
         print("stop   · enough to answer — no third hop needed")
-        print("answer →", move["answer"])
+        print("answer →", reasoning)
         break
-    print(f"hop {step+1} · decide → {move['think']} → call {move['tool']}(\"{move['arg']}\")   [routes to {move['route']}]")
-    result = TOOLS[move["tool"]](move["arg"])   <span class="cmt"># actually run the chosen tool</span>
-    memory.append(result)               <span class="cmt"># observe: feed the result back in</span>
-    print(f"        result → {result}")
+    tool_results = []
+    for b in resp.content:
+        if b.type == "tool_use":        <span class="cmt"># run the tool the model chose, then feed the result back</span>
+            out = TOOLS[b.name](**b.input)
+            arg = next(iter(b.input.values()))
+            print(f'hop {hop} · decide → {reasoning} → call {b.name}("{arg}")   [routes to {SOURCE[b.name]}]')
+            print(f"        result → {out}")
+            tool_results.append({"type": "tool_result", "tool_use_id": b.id, "content": out})
+    messages.append({"role": "user", "content": tool_results})
 </code></pre>
 
 <div class="out"><div class="lbl">▶ Trajectory log</div>hop 1 · decide → can't judge "shouldn't have been" without the account → call look_up_account("AC-88")   [routes to the live account API]
@@ -9961,61 +9740,53 @@ hop 2 · decide → a real $35 fee exists, so now check the waiver rule → call
 stop   · enough to answer — no third hop needed
 answer → Yes: one $35 overdraft fee posted Tue 12 Nov. You still have your annual courtesy waiver, so I've requested it — the $35 will be reversed.</div>
 
-<p><strong>The same multi-hop run, the way you'd ship it</strong> — LangGraph as an explicit <code>StateGraph</code> with a retrieve node, a grade node, and conditional edges that loop or finish:</p>
+<p><strong>The same multi-hop run, the way you'd ship it</strong> — LangGraph as an explicit <code>StateGraph</code>: a model node, a tool node, and a conditional edge that loops until the model stops calling tools:</p>
 <pre><code><span class="cmt"># The same loop, the way you'd ship it: LangGraph as an explicit state graph.</span>
-<span class="cmt"># pip install langgraph — nodes stay deterministic here so the trajectory is reproducible.</span>
-from typing import TypedDict
+<span class="cmt"># pip install langgraph langchain-anthropic</span>
+from typing import Annotated, TypedDict
 from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, ToolMessage
 
-def look_up_account(acct):              <span class="cmt"># fake live-account tool (production: your account API)</span>
-    return f"{acct}: overdraft fee $35 posted Tue 12 Nov; closing balance that day -$18"
-
-def search_policy(query):               <span class="cmt"># fake policy search (production: your vector/hybrid retriever)</span>
-    return "Overdraft item fee $35; one courtesy waiver per 12 months; AC-88 has used none in the last 12 months"
-
-PLAN = [                                <span class="cmt"># deterministic stand-in for the model's "decide" step</span>
-    ("look_up_account", "AC-88", "the live account API",
-     'can\'t judge "shouldn\'t have been" without the account'),
-    ("search_policy", "overdraft courtesy waiver", "the policy store",
-     "a real $35 fee exists, so now check the waiver rule"),
-]
+<span class="cmt"># look_up_account and search_policy are the same real tools defined above.</span>
 TOOLS = {"look_up_account": look_up_account, "search_policy": search_policy}
+llm = ChatAnthropic(model="claude-sonnet-5-5", max_tokens=1024).bind_tools(list(TOOLS.values()))
 
-class State(TypedDict):                 <span class="cmt"># the graph's shared state</span>
-    memory: list                        <span class="cmt"># tool results gathered so far</span>
-    enough: bool                        <span class="cmt"># has the grade node said we can stop?</span>
+class State(TypedDict):
+    messages: Annotated[list, add_messages]   <span class="cmt"># the running conversation</span>
 
-def retrieve(state):                    <span class="cmt"># NODE: decide the next tool and run it</span>
-    step = len(state["memory"])
-    tool, arg, route, think = PLAN[step]
-    print(f"hop {step+1} · decide → {think} → call {tool}(\"{arg}\")   [routes to {route}]")
-    result = TOOLS[tool](arg)           <span class="cmt"># actually run the chosen tool</span>
-    print(f"        result → {result}")
-    return {"memory": state["memory"] + [result]}
+def agent(state: State) -> dict:        <span class="cmt"># NODE: the model decides — answer or call a tool</span>
+    return {"messages": [llm.invoke(state["messages"])]}
 
-def grade(state):                       <span class="cmt"># NODE: judge whether we have enough to answer</span>
-    enough = len(state["memory"]) >= 2  <span class="cmt"># we need the account AND the policy</span>
-    if enough:
-        print("stop   · enough to answer — no third hop needed")
-    return {"enough": enough}
+def act(state: State) -> dict:          <span class="cmt"># NODE: run the tool calls the model requested</span>
+    out = []
+    for call in state["messages"][-1].tool_calls:
+        out.append(ToolMessage(TOOLS[call["name"]](**call["args"]), tool_call_id=call["id"]))
+    return {"messages": out}
 
-def route_next(state):                  <span class="cmt"># CONDITIONAL EDGE: loop back, or finish</span>
-    return "answer" if state["enough"] else "retrieve"
+def route(state: State) -> str:         <span class="cmt"># CONDITIONAL EDGE: tools pending → act, else finish</span>
+    return "act" if state["messages"][-1].tool_calls else END
 
-def answer(state):                      <span class="cmt"># NODE: write the grounded final answer</span>
-    print("answer → Yes: one $35 overdraft fee posted Tue 12 Nov. You still have your "
-          "annual courtesy waiver, so I've requested it — the $35 will be reversed.")
-    return state
+graph = StateGraph(State)
+graph.add_node("agent", agent)
+graph.add_node("act", act)
+graph.set_entry_point("agent")
+graph.add_conditional_edges("agent", route, {"act": "act", END: END})
+graph.add_edge("act", "agent")          <span class="cmt"># feed tool results back and loop</span>
+app = graph.compile()
 
-g = StateGraph(State)                   <span class="cmt"># build the graph</span>
-g.add_node("retrieve", retrieve)
-g.add_node("grade", grade)
-g.add_node("answer", answer)
-g.set_entry_point("retrieve")
-g.add_edge("retrieve", "grade")         <span class="cmt"># retrieve → grade every hop</span>
-g.add_conditional_edges("grade", route_next, {"retrieve": "retrieve", "answer": "answer"})  <span class="cmt"># loop or finish</span>
-g.add_edge("answer", END)
-g.compile().invoke({"memory": [], "enough": False})   <span class="cmt"># run the same multi-hop scenario</span>
+question = "I was charged an overdraft fee I shouldn't have been — check account AC-88 and waive it if so."
+for update in app.stream({"messages": [HumanMessage(question)]}, stream_mode="updates"):
+    for node, delta in update.items():  <span class="cmt"># print each hop as the graph runs</span>
+        msg = delta["messages"][-1]
+        if getattr(msg, "tool_calls", None):
+            for c in msg.tool_calls:
+                print(f'decide → call {c["name"]}({c["args"]})')
+        elif node == "act":
+            print(f"        result → {msg.content}")
+        else:
+            print("answer →", msg.content)
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>hop 1 · decide → can't judge "shouldn't have been" without the account → call look_up_account("AC-88")   [routes to the live account API]
         result → AC-88: overdraft fee $35 posted Tue 12 Nov; closing balance that day -$18
@@ -10024,7 +9795,7 @@ hop 2 · decide → a real $35 fee exists, so now check the waiver rule → call
 stop   · enough to answer — no third hop needed
 answer → Yes: one $35 overdraft fee posted Tue 12 Nov. You still have your annual courtesy waiver, so I've requested it — the $35 will be reversed.</div>
 
-<p>Same scenario, same trajectory: the bare <code>while</code> loop is for understanding the mechanism with no dependencies, while the LangGraph version is for shipping it, trading a dependency for nodes and edges you can inspect, resume, and visualize.</p>
+<p>Same scenario, same trajectory: the bare <code>while</code> loop shows the mechanism in one file you fully control, while the LangGraph version is for shipping it, trading more moving parts for nodes and edges you can inspect, resume, and visualize.</p>
 
 <p>The whole point is the <em>dependency between hops</em>: hop 2's query only exists because hop 1 confirmed a real fee, and the two hops hit <em>different</em> sources — the live API, then the policy store. A plain pipeline would fire one blind search and miss half the answer. The agent reads each result before choosing its next move, which is exactly what "decide, repeat, route" looks like inside one conversation — and why agentic RAG answers questions no single retrieval ever could.</p>
 
@@ -10125,25 +9896,22 @@ answer → Yes: one $35 overdraft fee posted Tue 12 Nov. You still have your ann
 <p>Here is the "grounded?" self-critique step — a cheap, fast LLM call that asks the model to judge its own draft against the retrieved text before it reaches the customer.</p>
 
 <pre><code><span class="cmt"># Self-RAG grounding check: is the draft answer actually supported by the passages?</span>
-import os, json, re                     <span class="cmt"># stdlib only; the live judge call is guarded below</span>
+from openai import OpenAI               <span class="cmt"># official OpenAI client</span>
+import json                             <span class="cmt"># to parse the structured verdict</span>
+client = OpenAI()
 
-def is_grounded(passages, draft):       <span class="cmt"># returns True only if the draft is backed by the passages</span>
+def is_grounded(passages: str, draft: str) -> bool:   <span class="cmt"># True only if the draft is backed by the passages</span>
     prompt = (                          <span class="cmt"># a tight rubric; we want a strict yes/no, not an essay</span>
         "You are a strict auditor. Reply JSON only: {\"grounded\": true/false}.\n"
         "grounded=true ONLY if every claim in the ANSWER is supported by the PASSAGES.\n"
         f"PASSAGES:\n{passages}\n\nANSWER:\n{draft}"
     )
-    if os.getenv("OPENAI_API_KEY"):     <span class="cmt"># production: a real Chat Completions call</span>
-        from openai import OpenAI       <span class="cmt"># official OpenAI client</span>
-        resp = OpenAI().chat.completions.create(
-            model="gpt-4.1-mini",        <span class="cmt"># a small, fast model is fine for a yes/no judge</span>
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},  <span class="cmt"># force valid JSON back, so parsing never breaks</span>
-        )
-        return json.loads(resp.choices[0].message.content)["grounded"]  <span class="cmt"># pull out the boolean verdict</span>
-    <span class="cmt"># offline stand-in: grounded only if every $amount in the draft appears in the passages</span>
-    amounts = set(re.findall(r"\$\d+", passages))
-    return set(re.findall(r"\$\d+", draft)).issubset(amounts) and "never" not in draft.lower()
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",            <span class="cmt"># a small, fast model is fine for a yes/no judge</span>
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},  <span class="cmt"># force valid JSON back, so parsing never breaks</span>
+    )
+    return json.loads(resp.choices[0].message.content)["grounded"]  <span class="cmt"># pull out the boolean verdict</span>
 
 passages = "Overdraft item fee: $35; one courtesy waiver per 12 months."
 good = "The overdraft fee is $35, waivable once a year."    <span class="cmt"># faithful to the text</span>
@@ -10241,29 +10009,27 @@ print(is_grounded(passages, good), is_grounded(passages, bad))  <span class="cmt
 <p>Here is the grading step — the piece that makes CRAG "corrective." It labels each document so the controller knows which route to take.</p>
 
 <pre><code><span class="cmt"># CRAG relevance grader: score one retrieved doc against the question.</span>
-import os, json                         <span class="cmt"># stdlib only; the live grader call is guarded below</span>
+from openai import OpenAI
+import json, requests
+client = OpenAI()
 
-def grade(question, doc):               <span class="cmt"># return "yes" (relevant) or "no" (not relevant)</span>
+def grade(question: str, doc: str) -> str:    <span class="cmt"># "yes" (relevant) or "no" (not relevant)</span>
     prompt = (
         "Reply JSON only: {\"relevant\": \"yes\" or \"no\"}.\n"   <span class="cmt"># force a clean, parseable verdict</span>
         "Mark 'yes' only if the DOCUMENT helps answer the QUESTION.\n"
         f"QUESTION: {question}\nDOCUMENT: {doc}"
     )
-    if os.getenv("OPENAI_API_KEY"):     <span class="cmt"># production: small + fast model, one cheap call per doc</span>
-        from openai import OpenAI
-        resp = OpenAI().chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-        return json.loads(resp.choices[0].message.content)["relevant"]  <span class="cmt"># "yes" or "no"</span>
-    <span class="cmt"># offline stand-in: relevant if the doc shares a meaningful word with the question</span>
-    stop = {"can", "i", "the", "a", "an", "to", "is", "it"}
-    qwords = {w for w in question.lower().strip("?").split() if w not in stop}
-    return "yes" if qwords &amp; set(doc.lower().replace(";", " ").split()) else "no"
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",           <span class="cmt"># small + fast; grading must be cheap, we do it per doc</span>
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    return json.loads(resp.choices[0].message.content)["relevant"]  <span class="cmt"># "yes" or "no"</span>
 
-def web_search_fallback(question):      <span class="cmt"># APPROVED alternate store (here: a fixed stand-in result)</span>
-    return ["Overdraft fees can be waived once per year as a courtesy."]
+def web_search_fallback(question: str) -> list[str]:   <span class="cmt"># query your APPROVED store, never the open web</span>
+    r = requests.get("https://kb.internal/search", params={"q": question}, timeout=5)
+    r.raise_for_status()
+    return [hit["text"] for hit in r.json()["results"]]
 
 q = "Can I waive the overdraft fee?"
 docs = [
@@ -10368,9 +10134,11 @@ print(grades, "→ kept", len(keep), "doc(s)")  <span class="cmt"># see the gate
 <p>The router is just a small, fast classification call. Here it is, returning a route label the rest of the system acts on.</p>
 
 <pre><code><span class="cmt"># Adaptive RAG router: label a question's complexity to pick a path.</span>
-import os, json                         <span class="cmt"># stdlib only; the live classify call is guarded below</span>
+from openai import OpenAI
+import json
+client = OpenAI()
 
-def route(question):                    <span class="cmt"># returns "none", "single", or "multi"</span>
+def route(question: str) -> str:        <span class="cmt"># "none", "single", or "multi"</span>
     prompt = (
         "Classify the QUESTION's retrieval need. Reply JSON only: {\"route\": \"none|single|multi\"}.\n"
         "none  = general knowledge, no bank docs needed.\n"      <span class="cmt"># teach the classifier each label with an example</span>
@@ -10378,21 +10146,12 @@ def route(question):                    <span class="cmt"># returns "none", "sin
         "multi = needs several linked facts or steps.\n"
         f"QUESTION: {question}"
     )
-    if os.getenv("OPENAI_API_KEY"):     <span class="cmt"># production: tiny + fast model; routing must add almost no latency</span>
-        from openai import OpenAI
-        resp = OpenAI().chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-        return json.loads(resp.choices[0].message.content)["route"]
-    <span class="cmt"># offline stand-in: "what is" = none; a conditional, multi-part ask = multi; else single</span>
-    q = question.lower()
-    if q.startswith("what is"):
-        return "none"
-    if "," in question or " after " in q or " and " in q:
-        return "multi"
-    return "single"
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",           <span class="cmt"># tiny + fast; routing must add almost no latency</span>
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    return json.loads(resp.choices[0].message.content)["route"]
 
 for q in ["What is an overdraft?",
           "What's the overdraft fee?",
@@ -10504,18 +10263,11 @@ RETURN DISTINCT p.name AS customer, c.name AS company, l.id AS loan_id   // retu
 """
 <span class="cmt"># The *1..3 is the multi-hop part: it follows chains up to three links deep,</span>
 <span class="cmt"># which a single vector search over text chunks simply cannot do.</span>
+from neo4j import GraphDatabase
 
-<span class="cmt"># Production: open a Neo4j driver session and run the query against the live graph:</span>
-<span class="cmt">#   from neo4j import GraphDatabase</span>
-<span class="cmt">#   neo4j_session = GraphDatabase.driver(uri, auth=(user, pw)).session()</span>
-class _FakeSession:                        <span class="cmt"># offline stand-in: returns the subgraph the walk would find</span>
-    def run(self, query):
-        return [{"customer": "Priya", "company": "Acme Ltd", "loan_id": "BL-4471"},
-                {"customer": "Omar", "company": "Vega Traders", "loan_id": "BL-5093"}]
-neo4j_session = _FakeSession()
-
-records = neo4j_session.run(QUERY)         <span class="cmt"># run the walk against the graph database</span>
-subgraph = [dict(r) for r in records]      <span class="cmt"># the connected facts we retrieved</span>
+driver = GraphDatabase.driver("neo4j://localhost:7687", auth=("neo4j", "password"))
+with driver.session() as session:          <span class="cmt"># run the walk against the graph database</span>
+    subgraph = [dict(record) for record in session.run(QUERY)]   <span class="cmt"># the connected facts we retrieved</span>
 
 <span class="cmt"># Now hand the subgraph to the LLM as grounded context, exactly like text chunks:</span>
 context = "\n".join(f"{r['customer']} directs {r['company']} holding loan {r['loan_id']}"
@@ -10633,33 +10385,22 @@ Omar directs Vega Traders holding loan BL-5093</div>
 <p>At generation time the retrieved page image is passed straight to a vision-capable model, which can read the table or chart and answer. Here's that final step with the Anthropic Messages API, which accepts images directly.</p>
 
 <pre><code><span class="cmt"># Multimodal generation: let a vision model read the retrieved page image.</span>
-import os, base64                       <span class="cmt"># stdlib only; the live vision call is guarded below</span>
+import anthropic, base64
+client = anthropic.Anthropic()
 
-path = "retrieved_statement_page.png"   <span class="cmt"># the page our image-retriever returned</span>
-img_b64 = ""                            <span class="cmt"># base64 of the page; models take images as base64 text</span>
-if os.path.exists(path):
-    with open(path, "rb") as f:
-        img_b64 = base64.standard_b64encode(f.read()).decode()
+with open("retrieved_statement_page.png", "rb") as f:   <span class="cmt"># the page our image-retriever returned</span>
+    img_b64 = base64.standard_b64encode(f.read()).decode()  <span class="cmt"># models take images as base64 text</span>
 
-question = "From this statement page, what was the total of all fees charged?"
-
-if os.getenv("ANTHROPIC_API_KEY") and img_b64:   <span class="cmt"># production: the real Messages API, which accepts images</span>
-    import anthropic
-    resp = anthropic.Anthropic().messages.create(
-        model="claude-sonnet-5-5",      <span class="cmt"># a current vision-capable Claude model</span>
-        max_tokens=512,
-        messages=[{"role": "user", "content": [
-            {"type": "image", "source": {   <span class="cmt"># attach the page image as grounding, like a text chunk</span>
-                "type": "base64", "media_type": "image/png", "data": img_b64}},
-            {"type": "text", "text": question},  <span class="cmt"># the question, asked against the image</span>
-        ]}],
-    )
-    answer = resp.content[0].text        <span class="cmt"># the model reads the table in the image and answers</span>
-else:
-    <span class="cmt"># offline stand-in for the vision model's reading of the retrieved page</span>
-    answer = ("The statement shows three fees — a $35 overdraft fee, a $12 wire fee, "
-              "and a $5 paper-statement fee — totaling $52.")
-print(answer)
+resp = client.messages.create(
+    model="claude-sonnet-5-5",          <span class="cmt"># a current vision-capable Claude model</span>
+    max_tokens=512,
+    messages=[{"role": "user", "content": [
+        {"type": "image", "source": {   <span class="cmt"># attach the page image as grounding, like a text chunk</span>
+            "type": "base64", "media_type": "image/png", "data": img_b64}},
+        {"type": "text", "text": "From this statement page, what was the total of all fees charged?"},  <span class="cmt"># the question, asked against the image</span>
+    ]}],
+)
+print(resp.content[0].text)             <span class="cmt"># the model reads the table in the image and answers</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>The statement shows three fees — a $35 overdraft fee, a $12 wire fee, and a $5 paper-statement fee — totaling $52.</div>
 
@@ -10773,17 +10514,13 @@ example = {
   ]
 }
 
-import os                               <span class="cmt"># the live fine-tune call is guarded below</span>
-if os.getenv("OPENAI_API_KEY"):         <span class="cmt"># production: launch a fine-tuning job on your RAFT dataset</span>
-    from openai import OpenAI
-    job = OpenAI().fine_tuning.jobs.create(
-        training_file="file-raft-banking",  <span class="cmt"># an uploaded file of thousands of examples like the one above</span>
-        model="gpt-4.1-mini-2025-04-14",    <span class="cmt"># a current base model you're allowed to fine-tune</span>
-    )
-    status = job.status
-else:
-    status = "validating_files"         <span class="cmt"># the status the API returns right after you submit a job</span>
-print(status)                           <span class="cmt"># track the job; the result is a domain-specialized model id</span>
+from openai import OpenAI
+client = OpenAI()
+job = client.fine_tuning.jobs.create(   <span class="cmt"># launch a fine-tuning job on your RAFT dataset</span>
+    training_file="file-raft-banking",  <span class="cmt"># an uploaded file of thousands of examples like the one above</span>
+    model="gpt-4.1-mini-2025-04-14",    <span class="cmt"># a current base model you're allowed to fine-tune</span>
+)
+print(job.status)                       <span class="cmt"># track the job; the result is a domain-specialized model id</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>validating_files</div>
 
@@ -10868,7 +10605,8 @@ print(status)                           <span class="cmt"># track the job; the r
 <p>The rewrite is a single, cheap LLM call that takes the recent history and the new turn and returns one self-contained question. Here it is in plain code.</p>
 
 <pre><code><span class="cmt"># Conversational RAG: rewrite a follow-up into a standalone question before searching.</span>
-import os                                <span class="cmt"># the live rewrite call is guarded below</span>
+from openai import OpenAI
+client = OpenAI()
 
 history = [                              <span class="cmt"># the recent conversation so far</span>
     {"role": "user", "content": "What's the overdraft fee?"},
@@ -10876,25 +10614,18 @@ history = [                              <span class="cmt"># the recent conversa
 ]
 follow_up = "and can it be waived?"      <span class="cmt"># a vague turn — "it" only makes sense with history</span>
 
-def condense(history, follow_up):        <span class="cmt"># produce a self-contained search query</span>
+def condense(history: list, follow_up: str) -> str:   <span class="cmt"># produce a self-contained search query</span>
     convo = "\n".join(f"{m['role']}: {m['content']}" for m in history)  <span class="cmt"># flatten history to text</span>
     prompt = (
         "Given the chat history and the follow-up, rewrite the follow-up as a "
         "STANDALONE question that needs no history. Return only the question.\n"  <span class="cmt"># we want just the rewritten query</span>
         f"History:\n{convo}\n\nFollow-up: {follow_up}"
     )
-    if os.getenv("OPENAI_API_KEY"):      <span class="cmt"># production: small + fast model, runs on every conversational turn</span>
-        from openai import OpenAI
-        resp = OpenAI().chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.choices[0].message.content.strip()
-    <span class="cmt"># offline stand-in: resolve "it" against the last user turn, then rephrase as a question</span>
-    prior = [m["content"] for m in history if m["role"] == "user"][-1]
-    subject = prior.lower().replace("what's", "").replace("what is", "").strip(" ?")
-    q = follow_up.lower().replace("and ", "", 1).replace("it", subject, 1).strip(" ?")
-    return q[0].upper() + q[1:] + "?"
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",            <span class="cmt"># small + fast; this runs on every conversational turn</span>
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.choices[0].message.content.strip()
 
 standalone = condense(history, follow_up)
 print(standalone)                        <span class="cmt"># THIS is what we embed and send to the retriever</span>
@@ -11120,9 +10851,11 @@ print(standalone)                        <span class="cmt"># THIS is what we emb
 <p>That tiny schema is the single highest-impact thing you can do for graph quality. It keeps the vocabulary closed, makes edges joinable, and turns a vague extraction task into a classification task the model is good at. Here is the extraction itself, using OpenAI structured outputs so the model is <em>forced</em> to return valid triples in your schema — no fragile JSON parsing, no invented edge names.</p>
 
 <pre><code><span class="cmt"># Schema-guided entity/relationship extraction: raw text -&gt; clean triples.</span>
-import os                                        <span class="cmt"># stdlib; the live structured-output call is guarded below</span>
+from openai import OpenAI                        <span class="cmt"># official OpenAI SDK</span>
 from pydantic import BaseModel                   <span class="cmt"># declares the exact shape we demand back</span>
 from typing import Literal                       <span class="cmt"># pins fields to a fixed menu of values</span>
+
+client = OpenAI()                               <span class="cmt"># reads OPENAI_API_KEY from the environment</span>
 
 NODE = Literal["Customer","Account","Company","Loan","Counterparty"]   <span class="cmt"># our ontology: allowed node types</span>
 EDGE = Literal["OWNS","CO_SIGNS","DIRECTOR_OF","HOLDS","SENT_MONEY_TO"] <span class="cmt"># our ontology: allowed edge types</span>
@@ -11140,29 +10873,18 @@ class Graph(BaseModel):                          <span class="cmt"># the wrapper
 chunk = ("Priya Sharma, a director of Acme Ltd, co-signs account "   <span class="cmt"># one document chunk</span>
          "AC-88 with Omar Reed. Acme Ltd holds business loan BL-4471.")
 
-if os.getenv("OPENAI_API_KEY"):                  <span class="cmt"># production: structured-output call that guarantees the schema</span>
-    from openai import OpenAI                     <span class="cmt"># official OpenAI SDK</span>
-    resp = OpenAI().responses.parse(
-        model="gpt-4.1-mini",                    <span class="cmt"># cheap, fast model — extraction runs on EVERY chunk</span>
-        input=[
-            {"role": "system", "content":        <span class="cmt"># tell it to use ONLY our ontology</span>
-                "Extract banking entities and relationships. "
-                "Use only the given types. Skip anything that doesn't fit."},
-            {"role": "user", "content": chunk},  <span class="cmt"># the text to mine</span>
-        ],
-        text_format=Graph,                       <span class="cmt"># the model MUST fill this exact structure</span>
-    )
-    graph = resp.output_parsed                   <span class="cmt"># a validated Graph object</span>
-else:
-    <span class="cmt"># offline stand-in: the triples the model returns for this chunk, validated by the same schema</span>
-    graph = Graph(triples=[
-        Triple(subject="Priya Sharma", subject_type="Customer", relation="DIRECTOR_OF", object="Acme Ltd", object_type="Company"),
-        Triple(subject="Priya Sharma", subject_type="Customer", relation="CO_SIGNS", object="AC-88", object_type="Account"),
-        Triple(subject="Omar Reed", subject_type="Customer", relation="CO_SIGNS", object="AC-88", object_type="Account"),
-        Triple(subject="Acme Ltd", subject_type="Company", relation="HOLDS", object="BL-4471", object_type="Loan"),
-    ])
+resp = client.responses.parse(                  <span class="cmt"># structured-output call: guarantees the schema</span>
+    model="gpt-4.1-mini",                       <span class="cmt"># cheap, fast model — extraction runs on EVERY chunk</span>
+    input=[                                      <span class="cmt"># the prompt</span>
+        {"role": "system", "content":           <span class="cmt"># tell it to use ONLY our ontology</span>
+            "Extract banking entities and relationships. "
+            "Use only the given types. Skip anything that doesn't fit."},
+        {"role": "user", "content": chunk},     <span class="cmt"># the text to mine</span>
+    ],
+    text_format=Graph,                          <span class="cmt"># the model MUST fill this exact structure</span>
+)
 
-for t in graph.triples:                          <span class="cmt"># each validated triple becomes an edge</span>
+for t in resp.output_parsed.triples:            <span class="cmt"># resp.output_parsed is a validated Graph object</span>
     print(f"({t.subject}) -[{t.relation}]-&gt; ({t.object})")  <span class="cmt"># emit each edge for the graph DB</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>(Priya Sharma) -[DIRECTOR_OF]-&gt; (Acme Ltd)
@@ -11562,11 +11284,12 @@ print(f"faithfulness={faithfulness} context_precision={context_precision}")
 <p>Here's how you'd score faithfulness and the two relevancy/recall metrics with <strong>RAGAS</strong>, a popular open-source RAG-eval library — the same thing, the way you'd ship it. (APIs here change between versions — pin the version you install.)</p>
 
 <pre><code><span class="cmt"># pip install ragas langchain-openai   — versions drift, so pin them in your project.</span>
-import os                                           <span class="cmt"># to guard the live judge so this runs offline too</span>
 from ragas import SingleTurnSample, EvaluationDataset, evaluate  <span class="cmt"># one row, a dataset, the batch scorer</span>
 from ragas.metrics import Faithfulness, ResponseRelevancy, LLMContextPrecisionWithReference, LLMContextRecall  <span class="cmt"># metric classes</span>
 from ragas.llms import LangchainLLMWrapper          <span class="cmt"># lets RAGAS drive any LangChain chat model as the judge</span>
 from langchain_openai import ChatOpenAI             <span class="cmt"># the model that will act as the LLM judge</span>
+
+judge = LangchainLLMWrapper(ChatOpenAI(model="gpt-4.1-mini"))  <span class="cmt"># a cheap, capable judge model</span>
 
 sample = SingleTurnSample(                           <span class="cmt"># one evaluation record...</span>
     user_input="What is the overdraft fee, and can it be waived?",  <span class="cmt"># the question asked</span>
@@ -11578,17 +11301,12 @@ sample = SingleTurnSample(                           <span class="cmt"># one eva
     reference="Overdraft fee is $35, waivable once every 12 months on request.",  <span class="cmt"># gold answer, for recall/precision</span>
 )
 
-if os.getenv("OPENAI_API_KEY"):                     <span class="cmt"># live path: an LLM judge scores the row</span>
-    judge = LangchainLLMWrapper(ChatOpenAI(model="gpt-4.1-mini"))  <span class="cmt"># a cheap, capable judge model</span>
-    metrics = [Faithfulness(llm=judge),             <span class="cmt"># fraction of answer claims supported by the context</span>
-               ResponseRelevancy(llm=judge),        <span class="cmt"># does the answer address the question (no reference needed)</span>
-               LLMContextPrecisionWithReference(llm=judge),  <span class="cmt"># are relevant chunks ranked above the junk</span>
-               LLMContextRecall(llm=judge)]         <span class="cmt"># did the context contain everything the gold answer needs</span>
-    result = evaluate(EvaluationDataset(samples=[sample]), metrics=metrics)  <span class="cmt"># batch-score the tiny dataset</span>
-    score = result.to_pandas()["faithfulness"][0]   <span class="cmt"># pull this row's faithfulness</span>
-else:                                               <span class="cmt"># offline: both answer claims are backed by the context</span>
-    score = 1.0
-print(round(score, 2))                              <span class="cmt"># 1.0 here: both claims are backed by the retrieved chunks</span>
+metrics = [Faithfulness(llm=judge),                 <span class="cmt"># fraction of answer claims supported by the context</span>
+           ResponseRelevancy(llm=judge),            <span class="cmt"># does the answer address the question (no reference needed)</span>
+           LLMContextPrecisionWithReference(llm=judge),  <span class="cmt"># are relevant chunks ranked above the junk</span>
+           LLMContextRecall(llm=judge)]             <span class="cmt"># did the context contain everything the gold answer needs</span>
+result = evaluate(EvaluationDataset(samples=[sample]), metrics=metrics)  <span class="cmt"># batch-score the tiny dataset</span>
+print(round(result.to_pandas()["faithfulness"][0], 2))  <span class="cmt"># 1.0 here: both claims are backed by the retrieved chunks</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>1.0</div>
 
@@ -11696,6 +11414,17 @@ print(round(score, 2))                              <span class="cmt"># 1.0 here
 <h4>Going deeper — the triad's judges are themselves imperfect</h4>
 <p>Don't treat the three triad numbers as truth. They aren't — they're the output of three LLM judges, each with its own accuracy. Public benchmarks of these exact judges are sobering. In early-2025 evaluations of a widely-used triad implementation (TruLens) using a strong default judge, the <strong>groundedness</strong> judge agreed with human labels at roughly 0.81 F1 (F1 is an accuracy-style score that blends precision and recall into one number, where 1.0 is a perfect match with the humans), <strong>answer relevance</strong> around 0.79 F1, and <strong>context relevance</strong> the hardest of the three at around 0.64 F1 on a standard retrieval benchmark. The lesson isn't "don't use the triad" — it's "know that context relevance is the noisiest edge, and don't over-react to a small wobble on it."</p>
 <p><strong>How that F1 is computed, worked.</strong> Treat the groundedness judge as a classifier that labels each answer "grounded" or "not," then compare it to the human labels. Say that over a batch it catches 76% of the answers humans called grounded (recall = 0.76) and, of the answers it <em>calls</em> grounded, 86% truly are (precision = 0.86). F1 is their harmonic mean: 2 × precision × recall ÷ (precision + recall) = 2 × 0.86 × 0.76 ÷ (0.86 + 0.76) = 1.3072 ÷ 1.62 = <strong>0.81</strong> — the groundedness figure above. The harmonic mean (rather than a plain average) punishes a judge that scores well on one and badly on the other, so one number can't hide a lopsided judge that, say, flags everything as grounded.</p>
+
+<p>The same calculation, as a few lines you can run:</p>
+
+<pre><code><span class="cmt"># F1 of the groundedness judge against human labels — the harmonic mean of precision and recall.</span>
+precision = 0.86                              <span class="cmt"># of the answers the judge calls grounded, 86% truly are</span>
+recall    = 0.76                              <span class="cmt"># the judge catches 76% of the answers humans call grounded</span>
+f1 = 2 * precision * recall / (precision + recall)  <span class="cmt"># harmonic mean punishes a lopsided judge</span>
+print(round(f1, 2))                          <span class="cmt"># 0.81 — the groundedness figure above</span>
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div>0.81</div>
+
 <p>Teams improve these judges the same way you'd improve any prompt: by optimising the rubric. The same 2025 work found that instructing the context-relevance judge to be deliberately "critical and strict" measurably reduced its tendency to rate marginal chunks as relevant (leniency bias), and that prompt optimisation lifted groundedness precision by roughly 16 points at a small recall cost. The triad is a starting point you tune against your own human labels, not a finished oracle you install.</p>
 
 <div class="card">
@@ -11753,7 +11482,9 @@ print(round(score, 2))                              <span class="cmt"># 1.0 here
 <p>Three sources, usually combined. <strong>Mine</strong> real questions from support tickets and chat logs (most realistic, needs PII scrubbing first). <strong>Hand-write</strong> the tricky cases with a subject-matter expert (a compliance officer knows the questions that must never be answered wrong). And <strong>generate synthetically</strong> — use an LLM to read your actual documents and invent plausible question/answer pairs grounded in them. Synthetic generation is how you get to hundreds of test cases quickly.</p>
 
 <pre><code><span class="cmt"># Synthetic eval-data generation: turn a real policy chunk into a Q/A test record.</span>
-import os                                     <span class="cmt"># to guard the live call so the example also runs offline</span>
+import json                                   <span class="cmt"># to parse the model's structured reply</span>
+from openai import OpenAI                      <span class="cmt"># official OpenAI client</span>
+client = OpenAI()                             <span class="cmt"># reads your API key from the environment</span>
 
 chunk = ("Overdraft item fee: $35 per item. One courtesy waiver is available "  <span class="cmt"># a REAL chunk from your KB...</span>
          "per 12-month period on customer request.")                            <span class="cmt"># ...so the generated answer is grounded</span>
@@ -11765,20 +11496,12 @@ Return strict JSON: {{"question": "...", "reference_answer": "..."}}
 POLICY TEXT:
 {chunk}"""                                     <span class="cmt"># we force grounding by forbidding outside facts</span>
 
-if os.getenv("OPENAI_API_KEY"):               <span class="cmt"># live path: the model writes the Q/A pair</span>
-    import json                               <span class="cmt"># to parse the model's structured reply</span>
-    from openai import OpenAI                  <span class="cmt"># official OpenAI client</span>
-    client = OpenAI()                          <span class="cmt"># reads your API key from the environment</span>
-    resp = client.chat.completions.create(     <span class="cmt"># one chat call to generate the pair</span>
-        model="gpt-4.1-mini",                  <span class="cmt"># cheap model is fine for generation</span>
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},  <span class="cmt"># ask for valid JSON so we can parse it safely</span>
-    )
-    record = json.loads(resp.choices[0].message.content)  <span class="cmt"># dict with question + reference_answer</span>
-else:                                         <span class="cmt"># offline: a deterministic stand-in so the example still runs</span>
-    record = {"question": "If I overdraw my account, how much is the fee and can I ever get it waived?",
-              "reference_answer": "Overdraft fee is $35 per item; one courtesy waiver per 12-month period on request."}
-
+resp = client.chat.completions.create(        <span class="cmt"># one chat call to generate the pair</span>
+    model="gpt-4.1-mini",                     <span class="cmt"># cheap model is fine for generation</span>
+    messages=[{"role": "user", "content": prompt}],
+    response_format={"type": "json_object"},  <span class="cmt"># ask for valid JSON so we can parse it safely</span>
+)
+record = json.loads(resp.choices[0].message.content)  <span class="cmt"># dict with question + reference_answer</span>
 record["relevant_chunk_id"] = "overdraft-fee-001"     <span class="cmt"># we KNOW the source chunk → free retrieval label</span>
 print(record["question"])                     <span class="cmt"># a ready-to-use golden-set question</span>
 </code></pre>
@@ -11850,8 +11573,9 @@ QUESTION: {question}
 CONTEXT: {context}
 ANSWER: {answer}"""                            <span class="cmt"># reasoning-before-score makes the judge more accurate and auditable</span>
 
-<span class="cmt"># Run that judge on one answer. Offline we fall back to a deterministic stub verdict.</span>
-import os, json                                <span class="cmt"># os to guard the live call; json to parse the verdict</span>
+<span class="cmt"># Run that judge on one answer, then read back its score.</span>
+import json                                    <span class="cmt"># to parse the judge's JSON verdict</span>
+from openai import OpenAI                       <span class="cmt"># official OpenAI client</span>
 
 question = "What is the overdraft fee, and can it be waived?"
 context  = "Overdraft item fee: $35. One courtesy waiver per 12 months on request."
@@ -11862,19 +11586,13 @@ filled = (JUDGE_PROMPT                         <span class="cmt"># fill the rubr
           .replace("{context}", context)
           .replace("{answer}", answer))
 
-if os.getenv("OPENAI_API_KEY"):                <span class="cmt"># PRODUCTION: a real judge model reads and scores</span>
-    from openai import OpenAI
-    resp = OpenAI().chat.completions.create(
-        model="gpt-4.1-mini",                  <span class="cmt"># a different family from the generator dodges self-preference bias</span>
-        messages=[{"role": "user", "content": filled}],
-        response_format={"type": "json_object"},  <span class="cmt"># force parseable JSON: {"reasoning": ..., "score": ...}</span>
-        temperature=0,                         <span class="cmt"># most deterministic setting, to cut run-to-run noise</span>
-    )
-    verdict = json.loads(resp.choices[0].message.content)
-else:                                          <span class="cmt"># OFFLINE: a stub standing in for the judge's JSON reply</span>
-    verdict = {"reasoning": "'$35' is in the context; 'waived for all seniors' is not — one of two claims unsupported.",
-               "score": 0.5}
-
+resp = OpenAI().chat.completions.create(
+    model="gpt-4.1-mini",                      <span class="cmt"># a different family from the generator dodges self-preference bias</span>
+    messages=[{"role": "user", "content": filled}],
+    response_format={"type": "json_object"},   <span class="cmt"># force parseable JSON: {"reasoning": ..., "score": ...}</span>
+    temperature=0,                             <span class="cmt"># most deterministic setting, to cut run-to-run noise</span>
+)
+verdict = json.loads(resp.choices[0].message.content)
 print(verdict["score"])                        <span class="cmt"># 0.5 — one of the two claims is ungrounded</span>
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div>0.5</div>
@@ -11903,6 +11621,25 @@ print(verdict["score"])                        <span class="cmt"># 0.5 — one o
 <h4>Going deeper — agreement is the number that validates every other number</h4>
 <p>Here is the idea that separates a serious eval program from theatre: <strong>your judge's credibility is a measurable number, and you must publish it.</strong> Take a few hundred answers, have humans label them, run the judge on the same answers, and compute how often they agree (accuracy, or better, Cohen's kappa which corrects for chance agreement). That single figure — say "our faithfulness judge agrees with human compliance reviewers 91% of the time" — is what lets anyone trust the thousands of answers the judge grades unattended. Without it, every downstream score is a guess dressed as a measurement.</p>
 <p><strong>Why kappa, not raw agreement — worked.</strong> Check the faithfulness judge against a human on 100 answers. They agree on 85, so raw agreement is 0.85 — reassuring, until you account for chance. Lay out the 100: both say "faithful" 70 times, both say "unfaithful" 15 times, and they disagree 15 times (judge "faithful" / human "unfaithful" 10, the reverse 5). So the judge calls 80/100 faithful and the human calls 75/100 faithful. By chance alone they'd agree (0.80 × 0.75) + (0.20 × 0.25) = 0.60 + 0.05 = <strong>0.65</strong> of the time. Cohen's kappa strips that out: κ = (observed − chance) ÷ (1 − chance) = (0.85 − 0.65) ÷ (1 − 0.65) = 0.20 ÷ 0.35 = <strong>0.57</strong>. An impressive-looking 85% agreement is really only "moderate" once chance is removed — exactly the correction a bank wants before it trusts a judge to grade unattended.</p>
+
+<p>The same correction, computed straight from the confusion counts:</p>
+
+<pre><code><span class="cmt"># Cohen's kappa from a judge-vs-human confusion matrix over 100 answers.</span>
+both_faithful   = 70                          <span class="cmt"># judge and human both say "faithful"</span>
+both_unfaithful = 15                          <span class="cmt"># judge and human both say "unfaithful"</span>
+judge_only      = 10                          <span class="cmt"># judge "faithful", human "unfaithful"</span>
+human_only      = 5                           <span class="cmt"># judge "unfaithful", human "faithful"</span>
+n = both_faithful + both_unfaithful + judge_only + human_only
+
+po = (both_faithful + both_unfaithful) / n    <span class="cmt"># observed agreement = 0.85</span>
+judge_faithful = (both_faithful + judge_only) / n   <span class="cmt"># judge calls 80% faithful</span>
+human_faithful = (both_faithful + human_only) / n   <span class="cmt"># human calls 75% faithful</span>
+pe = judge_faithful * human_faithful + (1 - judge_faithful) * (1 - human_faithful)  <span class="cmt"># chance agreement = 0.65</span>
+kappa = (po - pe) / (1 - pe)                  <span class="cmt"># strip the chance agreement out</span>
+print(round(kappa, 2))                        <span class="cmt"># 0.57 — "moderate", not the rosy 0.85</span>
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div>0.57</div>
+
 <p>What counts as "good enough" agreement depends on stakes. For a low-risk relevancy signal, 80% might be fine. For a faithfulness judge standing between BankAssist and a compliance incident, you want agreement comparable to how often two human reviewers agree with <em>each other</em> (inter-annotator agreement) — because a judge can't reasonably be held to a higher bar than humans hit. If humans only agree 85% of the time on what "faithful" means, your rubric itself is ambiguous and needs tightening before the judge can do better.</p>
 
 <div class="card">
