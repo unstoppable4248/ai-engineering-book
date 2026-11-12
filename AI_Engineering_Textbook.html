@@ -5419,15 +5419,20 @@ print("\n".join(rows))                             <span class="cmt"># each line
 
 <p>The trick is the <code>zip(header, r)</code> — it marries every value to its column name so "6.9%" never floats away from "30-year." For heavily ruled financial tables, <strong>Camelot</strong> (<code>camelot.read_pdf(path, flavor="lattice")</code>) is a strong alternative that reads the cell borders directly.</p>
 
-<p><strong>How to chunk this.</strong> One chunk per table — never split mid-row. Keep the table as Markdown in <code>page_content</code>; for a table too big for one chunk, split by row <em>groups</em> and repeat the header row in each piece. The caption becomes the <code>section</code>.</p>
+<p><strong>How to chunk this.</strong> One chunk per table — never split mid-row. Keep the grid as Markdown in <code>page_content</code>; for a table too big for one chunk, split by row <em>groups</em>, repeat the header in each, and link the pieces with <code>parent_id</code>. The caption is the <code>section</code>.</p>
 <pre><code>from langchain_core.documents import Document
 
-md = "| Term | Rate |\n|---|---|\n" + "\n".join(      <span class="cmt"># keep the table as Markdown — rows survive</span>
-    f"| {t} | {r} |" for t, r in [("15-year", "6.2%"), ("20-year", "6.5%"), ("30-year", "6.9%")])
-doc = Document(page_content=md, metadata={            <span class="cmt"># one Document for the whole table</span>
+rows = [["Term", "Rate"], ["15-year", "6.2%"],     <span class="cmt"># pdfplumber: pdf.pages[8].extract_tables()[0]</span>
+        ["20-year", "6.5%"], ["30-year", "6.9%"]]
+header, body = rows[0], rows[1:]
+md = (" | ".join(header) + "\n" + " | ".join(["---"] * len(header)) + "\n"  <span class="cmt"># rebuild as Markdown</span>
+      + "\n".join(" | ".join(r) for r in body))
+docs = [Document(page_content=md, metadata={        <span class="cmt"># ONE Document for the whole table</span>
     "source": "rate_card_2026.pdf", "source_id": "s3:policies/rate_card_2026.pdf",
-    "page": 1, "section": "Fixed mortgage rate card"})  <span class="cmt"># section = the table's caption</span>
+    "page": 9, "section": "Mortgage Fees &gt; Rate card", "acl": "all-staff"})]
+print(len(docs), "chunk(s) produced"); print(repr(docs[0].page_content[:48])); print(docs[0].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>1 chunk(s) produced<br>'Term | Rate\n--- | ---\n15-year | 6.2%\n20-year | 6'<br>{'source': 'rate_card_2026.pdf', 'source_id': 's3:policies/rate_card_2026.pdf', 'page': 9, 'section': 'Mortgage Fees &gt; Rate card', 'acl': 'all-staff'}</code></p></div>
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood</div>
@@ -5528,10 +5533,14 @@ print(caption)                                       <span class="cmt"># verify 
 <p><strong>How to chunk this.</strong> The vision <em>caption</em> is the chunk's <code>page_content</code>; keep the image file as the citation through an <code>image</code> ref in metadata.</p>
 <pre><code>from langchain_core.documents import Document
 
-doc = Document(page_content=caption, metadata={      <span class="cmt"># the caption is what gets embedded</span>
+caption = ("Bar chart of default rate by region: Region C highest at 4.1%, "   <span class="cmt"># from the gpt-4.1 vision call</span>
+           "Region A lowest at 1.2%.")
+docs = [Document(page_content=caption, metadata={   <span class="cmt"># the caption is what gets embedded</span>
     "source": "mortgage_fees_2026.pdf", "source_id": "s3:policies/mortgage_fees_2026.pdf",
-    "page": 12, "image": "figures/p12_41.png", "section": "Default rates by region"})
+    "page": 12, "image": "figures/p12_41.png", "section": "Default rates by region", "acl": "all-staff"})]
+print(len(docs), "chunk(s) produced"); print(repr(docs[0].page_content[:48])); print(docs[0].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>1 chunk(s) produced<br>'Bar chart of default rate by region: Region C hi'<br>{'source': 'mortgage_fees_2026.pdf', 'source_id': 's3:policies/mortgage_fees_2026.pdf', 'page': 12, 'image': 'figures/p12_41.png', 'section': 'Default rates by region', 'acl': 'all-staff'}</code></p></div>
 
 <h4>OCR for scanned documents</h4>
 <p><strong>OCR</strong> (Optical Character Recognition) turns a picture of text back into actual characters. Under the hood it finds the text regions on the page, slices them into lines and then into individual letter shapes, and matches each shape to the character it most closely resembles. You need it whenever a PDF is a <em>scan</em> — a photographed loan agreement, an old signed KYC form — because those have no text layer at all. The usual tools:</p>
@@ -5886,16 +5895,24 @@ def parse_pdf(path):
 </code></pre>
 <p>The whole design lives in one line: <code>if len(text.strip()) &lt; 30</code>. That character-count heuristic decides, per page, whether the cheap parser was good enough or whether this page deserves the expensive one. Most pages pass; your bill stays small; the hard pages still get read.</p>
 
-<p><strong>How to chunk this.</strong> For born-digital prose, split with a token-sized <code>RecursiveCharacterTextSplitter</code> (~500 tokens, ~80 overlap), carrying <code>source</code>, <code>page</code> and <code>section</code> onto every chunk, then apply the token-limit guard (see the Chunking chapter).</p>
+<p><strong>How to chunk this.</strong> For born-digital prose, split with a token-sized <code>RecursiveCharacterTextSplitter</code> (~500 tokens, ~80 overlap), carrying <code>source</code>, <code>page</code> and <code>section</code> onto every chunk and <code>parent_id</code> pointing back at the page; then apply the token-limit guard (see the Chunking chapter).</p>
 <pre><code>from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
-splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(chunk_size=500, chunk_overlap=80)
-page = Document(page_content=page_text, metadata={    <span class="cmt"># one page's extracted prose + its labels</span>
+page_text = (                                      <span class="cmt"># one page from PyMuPDF page.get_text()</span>
+    "Early closure of a home loan incurs a fee. In year 1 the charge is 1% of the "
+    "outstanding balance, tapering to 0% by year 4; it is waived on refinance with the "
+    "bank. " * 20)                                 <span class="cmt"># a full page of policy prose</span>
+page = Document(page_content=page_text, metadata={
     "source": "home_loan_terms.pdf", "source_id": "s3:policies/home_loan_terms.pdf",
-    "page": 12, "section": "Home Loans &gt; 4 Fees &gt; 4.2 Early closure"})
-chunks = splitter.split_documents([page])            <span class="cmt"># metadata rides onto every chunk</span>
+    "page": 12, "section": "Home Loans &gt; 4 Fees &gt; 4.2 Early closure", "acl": "mortgages-team"})
+splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(chunk_size=500, chunk_overlap=80)
+chunks = splitter.split_documents([page])          <span class="cmt"># metadata rides onto every chunk</span>
+for c in chunks:
+    c.metadata["parent_id"] = c.metadata["source_id"]   <span class="cmt"># parent-child link back to the page</span>
+print(len(chunks), "chunk(s) produced"); print(repr(chunks[0].page_content[:48])); print(chunks[0].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>2 chunk(s) produced<br>'Early closure of a home loan incurs a fee. In ye'<br>{'source': 'home_loan_terms.pdf', 'source_id': 's3:policies/home_loan_terms.pdf', 'page': 12, 'section': 'Home Loans &gt; 4 Fees &gt; 4.2 Early closure', 'acl': 'mortgages-team', 'parent_id': 's3:policies/home_loan_terms.pdf'}</code></p></div>
 
 <div class="tipbox">
   <div class="lbl">✅ Tip</div>
@@ -5978,10 +5995,23 @@ print("\n".join(render(record)))                   <span class="cmt"># a flat-bu
 <p><strong>How to chunk this.</strong> One chunk per record/object — never split mid-object — with the key paths flattened into readable text and a stable record id in metadata.</p>
 <pre><code>from langchain_core.documents import Document
 
-docs = [Document(page_content="\n".join(render(rec)),  <span class="cmt"># render() = the path:value flattener above</span>
-                 metadata={"source": "customers.jsonl", "source_id": rec["customer"]})
-        for rec in [record]]                          <span class="cmt"># one Document per JSON record</span>
+def render(obj, prefix=""):                         <span class="cmt"># flatten nested keys into "path: value" lines</span>
+    out = []
+    if isinstance(obj, dict):
+        for k, v in obj.items(): out += render(v, f"{prefix}{k}.")
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj): out += render(v, f"{prefix}{i}.")
+    else: out.append(f"{prefix.rstrip('.')}: {obj}")
+    return out
+
+records = [{"product_id": "C1", "name": "Everyday Current", "monthly_fee": 0},   <span class="cmt"># one JSON object per line</span>
+           {"product_id": "C7", "name": "Premier Current", "monthly_fee": 12}]
+docs = [Document(page_content="\n".join(render(rec)),   <span class="cmt"># one Document per record</span>
+                 metadata={"source": "products.jsonl", "source_id": rec["product_id"]})
+        for rec in records]
+print(len(docs), "chunk(s) produced"); print(repr(docs[0].page_content[:48])); print(docs[0].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>2 chunk(s) produced<br>'product_id: C1\nname: Everyday Current\nmonthly_fe'<br>{'source': 'products.jsonl', 'source_id': 'C1'}</code></p></div>
 
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
@@ -6054,10 +6084,16 @@ for r in rows[1:]:                                 <span class="cmt"># iterate t
 <p><strong>How to chunk this.</strong> If the rows are narrative, make one chunk per row (or per logical group) as "Column: value" text. If the sheet is for aggregation or analytics, <em>don't chunk it</em> — route the question to the SQL / query engine (see Path B in Databases &amp; APIs).</p>
 <pre><code>from langchain_core.documents import Document
 
+rows = [("Product", "Fees $", "Txns"),             <span class="cmt"># openpyxl iter_rows(values_only=True)</span>
+        ("Overdraft", 13400, 512), ("Wire transfer", 8900, 140)]
+header = rows[0]
 docs = [Document(page_content=" | ".join(f"{h}: {v}" for h, v in zip(header, r)),  <span class="cmt"># one row = one chunk</span>
-                 metadata={"source": "fee_income.xlsx", "section": "Q3 Fees"})
-        for r in rows[1:]]                           <span class="cmt"># header/rows from the sheet read above</span>
+                 metadata={"source": "fee_income.xlsx",
+                           "source_id": "finance/fee_income.xlsx#Q3", "section": "Q3 Fees"})
+        for r in rows[1:]]
+print(len(docs), "chunk(s) produced"); print(repr(docs[0].page_content[:48])); print(docs[0].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>2 chunk(s) produced<br>'Product: Overdraft | Fees $: 13400 | Txns: 512'<br>{'source': 'fee_income.xlsx', 'source_id': 'finance/fee_income.xlsx#Q3', 'section': 'Q3 Fees'}</code></p></div>
 
 <h4>When to NOT use vector search at all</h4>
 <p>Vector search cannot do arithmetic. If a manager asks <em>"What was total fee income in Q3?"</em>, no amount of similarity search will <em>add up</em> the rows — it'll just fetch a few that look relevant. For aggregate and numeric questions, route the query to a <strong>query engine</strong> instead: generate SQL (Text-to-SQL) or a pandas operation over the structured table and compute the real answer. Reserve RAG for "what does this column mean?" questions over the data dictionary.</p>
@@ -6166,12 +6202,22 @@ print(f"{len(blobs)} embedded image(s) found; caption: {caption}")
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>1 embedded image(s) found; caption: Line chart: collateral valuation index up 3.1% across 2026.</code></p></div>
 
-<p><strong>How to chunk this.</strong> Split on the heading structure into one chunk per section, then size-split any oversized section; the heading path is the <code>section</code> (the loader above already emits one <code>Document</code> per paragraph with its breadcrumb).</p>
+<p><strong>How to chunk this.</strong> Split on the heading structure into one chunk per section, then size-split any oversized section; the heading path is the <code>section</code> and its own id is each chunk's <code>parent_id</code>. (The loader above already emits one <code>Document</code> per paragraph with its breadcrumb.)</p>
 <pre><code>from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 
+sections = [Document(                               <span class="cmt"># section Documents from the .docx heading walk above</span>
+    page_content="Valuers must be RICS-certified. A desktop valuation is allowed below "
+                 "$500,000; an in-person valuation is required above that.",
+    metadata={"source": "credit_policy.docx", "source_id": "sp:credit_policy.docx",
+              "section": "Credit Policy &gt; 4 Collateral &gt; 4.2 Valuation", "acl": "credit-team"})]
 splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(chunk_size=500, chunk_overlap=80)
-section_chunks = splitter.split_documents(chunks)    <span class="cmt"># chunks = the per-section Documents built above</span>
+chunks = splitter.split_documents(sections)        <span class="cmt"># size-split only the oversized sections</span>
+for c in chunks:
+    c.metadata["parent_id"] = c.metadata["section"]   <span class="cmt"># chunks of a section share its id</span>
+print(len(chunks), "chunk(s) produced"); print(repr(chunks[0].page_content[:48])); print(chunks[0].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>1 chunk(s) produced<br>'Valuers must be RICS-certified. A desktop valuat'<br>{'source': 'credit_policy.docx', 'source_id': 'sp:credit_policy.docx', 'section': 'Credit Policy &gt; 4 Collateral &gt; 4.2 Valuation', 'acl': 'credit-team', 'parent_id': 'Credit Policy &gt; 4 Collateral &gt; 4.2 Valuation'}</code></p></div>
 
 <p>PowerPoint hides its best content in the <strong>speaker notes</strong> — the bullets say "Early repayment," the notes say what it actually costs. Here's how to pull slide text and notes together with <code>python-pptx</code>:</p>
 
@@ -6218,10 +6264,15 @@ print(f"{len(pics)} slide image(s); first caption: {caption(pics[0])}")
 <p><strong>How to chunk this.</strong> One chunk per slide — title, body and speaker notes together — with <code>page</code> set to the slide number (the loader above already does this).</p>
 <pre><code>from langchain_core.documents import Document
 
-deck = [Document(page_content=f"{d.page_content}\n\nNotes: {d.metadata['notes']}",  <span class="cmt"># bullets + notes as one chunk</span>
-                 metadata={"source": d.metadata["source"], "page": d.metadata["page"]})
-        for d in chunks]                             <span class="cmt"># chunks = the per-slide Documents built above</span>
+slides = [("Switching your mortgage", ""),         <span class="cmt"># (visible text, speaker notes) per slide</span>
+          ("Early repayment charge", "Year 1 is 1% of the balance; it tapers to 0% by year 4.")]
+docs = [Document(page_content=title, metadata={     <span class="cmt"># one Document per slide</span>
+    "source": "mortgage_training.pptx", "source_id": "s3:training/mortgage_training.pptx",
+    "page": i, "section": title, "notes": notes})
+    for i, (title, notes) in enumerate(slides, start=1)]
+print(len(docs), "chunk(s) produced"); print(repr(docs[1].page_content[:48])); print(docs[1].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>2 chunk(s) produced<br>'Early repayment charge'<br>{'source': 'mortgage_training.pptx', 'source_id': 's3:training/mortgage_training.pptx', 'page': 2, 'section': 'Early repayment charge', 'notes': 'Year 1 is 1% of the balance; it tapers to 0% by year 4.'}</code></p></div>
 
 <h4>Going deeper — tracked changes, comments and the "which version is true?" problem</h4>
 <p>Office files carry history that a plain text dump quietly flattens. In Word, <strong>tracked changes</strong> mean the file holds both the old and the proposed wording; python-docx by default reads the <em>current</em> text, but a document mid-review can mix accepted and pending edits, so you must decide on purpose whether redlines are the live policy or stale suggestions. <strong>Comments</strong> ("legal to confirm this clause") are reviewer chatter, not policy — usually drop them, but keep them if the use case is reviewing the review. And every Office file has <strong>core properties</strong> (author, last-modified, title) worth capturing as metadata for freshness and provenance. The guiding rule: these formats know their own structure, so your job is to <em>preserve</em> it as boundaries and metadata, not to melt it into one blob.</p>
@@ -6288,11 +6339,16 @@ print(content[:70])                                 <span class="cmt"># confirm 
 <p><strong>How to chunk this.</strong> After stripping chrome, split by heading with <code>HTMLHeaderTextSplitter</code> (<code>&lt;h1&gt;</code>—<code>&lt;h6&gt;</code>); the heading path is the <code>section</code> and the canonical URL is the <code>source</code>.</p>
 <pre><code>from langchain_text_splitters import HTMLHeaderTextSplitter
 
-splitter = HTMLHeaderTextSplitter(headers_to_split_on=[("h1", "h1"), ("h2", "h2"), ("h3", "h3")])
-docs = splitter.split_text(content)                  <span class="cmt"># content = the cleaned main-article HTML from above</span>
-for d in docs:                                        <span class="cmt"># stamp the canonical URL as the source</span>
-    d.metadata["source"] = "https://bank.example/help/overdraft-fees"
+html = ("&lt;h1&gt;Overdraft fees&lt;/h1&gt;&lt;p&gt;An arranged overdraft is free.&lt;/p&gt;"   <span class="cmt"># the cleaned main article</span>
+        "&lt;h2&gt;Unarranged overdraft&lt;/h2&gt;&lt;p&gt;Unarranged use costs $5 per day, capped at $80 a month.&lt;/p&gt;")
+splitter = HTMLHeaderTextSplitter(headers_to_split_on=[("h1", "h1"), ("h2", "h2")])
+chunks = splitter.split_text(html)                 <span class="cmt"># one Document per heading section</span>
+for c in chunks:                                    <span class="cmt"># stamp the canonical identity + heading path</span>
+    c.metadata["source"] = "https://bank.example/help/overdraft-fees"
+    c.metadata["section"] = " &gt; ".join(c.metadata[h] for h in ("h1", "h2") if h in c.metadata)
+print(len(chunks), "chunk(s) produced"); print(repr(chunks[-1].page_content[:48])); print(chunks[-1].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>2 chunk(s) produced<br>'Unarranged use costs $5 per day, capped at $80 a'<br>{'h1': 'Overdraft fees', 'h2': 'Unarranged overdraft', 'source': 'https://bank.example/help/overdraft-fees', 'section': 'Overdraft fees &gt; Unarranged overdraft'}</code></p></div>
 
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
@@ -6387,14 +6443,26 @@ print(f"camt.053 statement for IBAN {iban}")        <span class="cmt"># render a
 <p>Two lessons sit in this snippet. First, the namespace dictionary <code>ns</code> — without it, <code>find</code> can't locate elements, because ISO 20022 tags are namespaced. Second, and more important, importing from <code>defusedxml</code> instead of the standard library is the entire XXE defence: same code, safe by construction.</p>
 
 <p><strong>How to chunk this.</strong> One chunk per logical <em>record</em> — a camt.053 entry, a <code>&lt;transaction&gt;</code> — never the whole file; lift the element's key fields into metadata.</p>
-<pre><code>from langchain_core.documents import Document
+<pre><code>from defusedxml.ElementTree import fromstring       <span class="cmt"># XXE-safe parser</span>
+from langchain_core.documents import Document
 
-docs = [Document(                                     <span class="cmt"># one Document per statement entry</span>
-    page_content=e.findtext("c:Amt", namespaces=ns),
-    metadata={"source": "camt053_2026-11-12.xml", "source_id": e.findtext("c:NtryRef", namespaces=ns),
-              "section": "camt.053.001.08"})
-    for e in root.findall(".//c:Ntry", ns)]          <span class="cmt"># iterate the entry elements</span>
+xml = ('&lt;Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08"&gt;&lt;Stmt&gt;'
+       '&lt;Ntry&gt;&lt;NtryRef&gt;E1&lt;/NtryRef&gt;&lt;Amt Ccy="USD"&gt;1200.00&lt;/Amt&gt;&lt;CdtDbtInd&gt;DBIT&lt;/CdtDbtInd&gt;&lt;BookgDt&gt;&lt;Dt&gt;2026-11-10&lt;/Dt&gt;&lt;/BookgDt&gt;&lt;/Ntry&gt;'
+       '&lt;Ntry&gt;&lt;NtryRef&gt;E2&lt;/NtryRef&gt;&lt;Amt Ccy="USD"&gt;35.00&lt;/Amt&gt;&lt;CdtDbtInd&gt;DBIT&lt;/CdtDbtInd&gt;&lt;BookgDt&gt;&lt;Dt&gt;2026-11-11&lt;/Dt&gt;&lt;/BookgDt&gt;&lt;/Ntry&gt;'
+       '&lt;/Stmt&gt;&lt;/Document&gt;')
+ns = {"c": "urn:iso:std:iso:20022:tech:xsd:camt.053.001.08"}
+root = fromstring(xml)
+docs = []
+for e in root.findall(".//c:Ntry", ns):            <span class="cmt"># one Document per statement entry</span>
+    amt = e.find("c:Amt", ns)
+    docs.append(Document(
+        page_content=f"{e.findtext('c:CdtDbtInd', namespaces=ns)} {amt.text} {amt.get('Ccy')} "
+                     f"booked {e.findtext('c:BookgDt/c:Dt', namespaces=ns)}",
+        metadata={"source": "camt053_2026-11-12.xml", "source_id": e.findtext("c:NtryRef", namespaces=ns),
+                  "section": "camt.053.001.08"}))
+print(len(docs), "chunk(s) produced"); print(repr(docs[0].page_content[:48])); print(docs[0].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>2 chunk(s) produced<br>'DBIT 1200.00 USD booked 2026-11-10'<br>{'source': 'camt053_2026-11-12.xml', 'source_id': 'E1', 'section': 'camt.053.001.08'}</code></p></div>
 
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
@@ -6483,12 +6551,22 @@ print(meta["subject"])                             <span class="cmt"># confirm h
 <p>For Outlook's <strong>.msg</strong> files the standard library won't help; use the <code>extract-msg</code> library, which exposes the same pieces (sender, subject, body, attachments). After parsing, the crucial clean-up step is stripping the quoted "On Tuesday, X wrote:" history so each message is stored once, not re-embedded in every reply.</p>
 
 <p><strong>How to chunk this.</strong> One chunk per <em>message</em> in the thread — split the quoted history first — with the headers carried as metadata.</p>
-<pre><code>from langchain_core.documents import Document
+<pre><code>import re
+from langchain_core.documents import Document
 
-docs = [Document(page_content=text, metadata={       <span class="cmt"># one message = one chunk (quotes stripped)</span>
-    "source": "dispute_thread.eml", "source_id": msg["message-id"],
-    "from": msg["from"], "to": msg["to"], "date": msg["date"], "subject": msg["subject"]})]
+body = ("I still don't recognise this $35 charge. Please reverse it.\n"   <span class="cmt"># newest reply on top</span>
+        "On Tue, 04 Nov 2026, support@bank.example wrote:\n"              <span class="cmt"># quote divider</span>
+        "&gt; Thanks for getting in touch. Could you confirm the date?")
+messages = [m.lstrip("&gt; ").strip()               <span class="cmt"># drop the quoted history</span>
+            for m in re.split(r"\nOn .*wrote:\n", body)]
+hdr = {"message-id": "&lt;m2@bank&gt;", "from": "customer@example.com", "to": "support@bank.example",
+       "date": "Tue, 04 Nov 2026 10:15:00 +0000", "subject": "Re: Unrecognised $35 charge"}
+docs = [Document(page_content=messages[0], metadata={   <span class="cmt"># one Document per message</span>
+    "source": "dispute_thread.eml", "source_id": hdr["message-id"], "from": hdr["from"],
+    "to": hdr["to"], "date": hdr["date"], "subject": hdr["subject"]})]
+print(len(messages), "messages;", len(docs), "chunk(s) for this reply"); print(repr(docs[0].page_content[:48])); print(docs[0].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>2 messages; 1 chunk(s) for this reply<br>"I still don't recognise this $35 charge. Please "<br>{'source': 'dispute_thread.eml', 'source_id': '&lt;m2@bank&gt;', 'from': 'customer@example.com', 'to': 'support@bank.example', 'date': 'Tue, 04 Nov 2026 10:15:00 +0000', 'subject': 'Re: Unrecognised $35 charge'}</code></p></div>
 
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
@@ -6554,11 +6632,15 @@ for r in rows:                                     <span class="cmt"># render ea
 <p><strong>How to chunk this.</strong> One row becomes one <code>Document</code> via a text template (Path A). Volatile rows — balances, live rates — are <em>not</em> ingested; query them live at question time (Path B below).</p>
 <pre><code>from langchain_core.documents import Document
 
-docs = [Document(                                     <span class="cmt"># one slow-changing row = one Document</span>
+rows = [{"product_id": "C1", "name": "Everyday Current", "monthly_fee": 0},   <span class="cmt"># read-only SELECT (Path A)</span>
+        {"product_id": "C7", "name": "Premier Current", "monthly_fee": 12}]
+docs = [Document(                                    <span class="cmt"># one slow-changing row = one Document</span>
     page_content=f"Product {r['name']} (id {r['product_id']}): monthly fee ${r['monthly_fee']}",
     metadata={"source": "corebank.products", "source_id": r["product_id"]})
-    for r in rows]                                   <span class="cmt"># rows from the read-only query above</span>
+    for r in rows]
+print(len(docs), "chunk(s) produced"); print(repr(docs[0].page_content[:48])); print(docs[0].metadata)
 </code></pre>
+<div class="out"><div class="lbl">▶ Output</div><p><code>2 chunk(s) produced<br>'Product Everyday Current (id C1): monthly fee $0'<br>{'source': 'corebank.products', 'source_id': 'C1'}</code></p></div>
 
 <h4>Path B — questions into SQL (query the volatile parts live)</h4>
 <p>For data that changes <em>fast</em> — a balance, a pending transaction, a live rate — <strong>never</strong> embed it. A balance embedded last Tuesday will be quoted as fact next month, and a wrong balance is a serious incident. Instead, let the assistant call the live system at the moment of the question: translate the user's words into a parameterised query or API call (<strong>Text-to-SQL</strong> or a tool call), run it against the system-of-record, and use the fresh result.</p>
@@ -7513,6 +7595,24 @@ chunks = fit_to_embed(chunks)                       <span class="cmt"># run this
   <div class="lbl">⚙️ Under the hood</div>
   <p>Match chunk size to two things: your <em>embedding model</em> and your <em>question style</em>. Many embedding models have a "comfort zone" of a few hundred tokens where quality peaks; feed them far more and the vector blurs. And short factoid questions ("overdraft fee?") favour small, sharp chunks, while synthesis questions ("walk me through disputing a charge") favour larger ones. There is no universal best size — only the best size <em>for your data and your queries</em>, which is why the next part matters more than any default.</p>
 </div>
+
+<h4>Chunking by file type — the quick map</h4>
+<p>The default above is for plain prose. The right unit of a chunk changes with the format, because the format decides what "one coherent piece" is. Here is the map; the runnable code for each sits next to its parser in the <strong>Ingestion &amp; Parsing chapter</strong>.</p>
+<table>
+  <tr><th>Format</th><th>Chunk unit</th><th>Key rule</th></tr>
+  <tr><td>Prose PDF / text</td><td>~500 tokens, 10–20% overlap</td><td>Recursive token splitter; carry source/page/section.</td></tr>
+  <tr><td>Tables</td><td>one chunk per table</td><td>Never split mid-row; Markdown in the chunk; repeat the header if a huge table must be split by row groups.</td></tr>
+  <tr><td>Figures / charts</td><td>one chunk per figure</td><td>The vision caption is the text; keep the image as the citation.</td></tr>
+  <tr><td>Word (.docx)</td><td>one chunk per section</td><td>Split on the heading structure, then size-split oversized sections.</td></tr>
+  <tr><td>PowerPoint (.pptx)</td><td>one chunk per slide</td><td>Title + body + speaker notes together; page = slide number.</td></tr>
+  <tr><td>HTML</td><td>one chunk per heading section</td><td>Strip chrome first; split by <code>&lt;h1&gt;–&lt;h6&gt;</code>; source = canonical URL.</td></tr>
+  <tr><td>XML</td><td>one chunk per record</td><td>Per logical element (a camt.053 entry, a <code>&lt;transaction&gt;</code>); never the whole file.</td></tr>
+  <tr><td>Email (.eml/.msg)</td><td>one chunk per message</td><td>Split the quoted thread first; headers (from/to/date/subject) into metadata.</td></tr>
+  <tr><td>CSV / Excel</td><td>one chunk per row, or don't chunk</td><td>Narrative rows → "Column: value" text; analytics → route to SQL, don't embed.</td></tr>
+  <tr><td>JSON / JSONL</td><td>one chunk per record</td><td>Flatten key paths into readable text; stable record id in metadata.</td></tr>
+  <tr><td>Database rows</td><td>one row → one chunk</td><td>Render via a text template (Path A); volatile rows queried live, not ingested (Path B).</td></tr>
+</table>
+<p>The thread through every row: a chunk is <em>one coherent unit of meaning</em> in that format — a table, a slide, a message, a record — not a fixed number of characters. Size-splitting is the fallback when a natural unit is too big, never the first move.</p>
 
 <h4>How to evaluate a chunking choice — the part everyone skips</h4>
 <p>Chunking is a tuning lever, and you can't tune what you don't measure. The honest way to compare two chunking settings is a small experiment, not a gut feeling.</p>
