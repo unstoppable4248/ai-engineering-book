@@ -14329,6 +14329,44 @@ print(reply if is_grounded(reply, chunks)
 </table>
 
 <p>The stages are wired into a <strong>parent-child job tree per document</strong> (BullMQ's <code>FlowProducer</code>): the parent job waits in a <em>waiting-children</em> state until every child stage finishes, then a completion check marks the document done. If any child fails after its retries, the parent never completes — so a half-ingested document is visible, not silently lost.</p>
+
+<figure>
+  <svg viewBox="0 0 680 270" role="img" aria-label="Ingestion as a job tree. An upload passes a backpressure gate that returns HTTP 429 when the queue is full. A parent job fans out to a chain of stage queues: parse, chunk, enrich, embed, index, each retrying three times. When every child stage completes, the document is marked done.">
+    <defs>
+      <marker id="g42q-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">
+      <!-- stage chain (children) -->
+      <rect x="66"  y="34" width="96" height="46" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="114" y="55" fill="var(--accent-ink)">Parse</text><text x="114" y="71" fill="var(--muted)" font-size="10" font-weight="500">retry ×3</text>
+      <rect x="180" y="34" width="96" height="46" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="228" y="55" fill="var(--accent-ink)">Chunk</text><text x="228" y="71" fill="var(--muted)" font-size="10" font-weight="500">retry ×3</text>
+      <rect x="294" y="34" width="96" height="46" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="342" y="55" fill="var(--accent-ink)">Enrich</text><text x="342" y="71" fill="var(--muted)" font-size="10" font-weight="500">LLM · retry ×3</text>
+      <rect x="408" y="34" width="96" height="46" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="456" y="55" fill="var(--accent-ink)">Embed</text><text x="456" y="71" fill="var(--muted)" font-size="10" font-weight="500">retry ×3</text>
+      <rect x="522" y="34" width="96" height="46" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="570" y="55" fill="var(--accent-ink)">Index</text><text x="570" y="71" fill="var(--muted)" font-size="10" font-weight="500">retry ×3</text>
+
+      <!-- bottom row: intake -> gate -> parent ... done -->
+      <rect x="30"  y="150" width="92"  height="46" rx="10" fill="var(--slate-soft)" stroke="var(--muted)"/><text x="76" y="178" fill="var(--ink)">Upload / crawl</text>
+      <rect x="150" y="146" width="120" height="54" rx="12" fill="var(--amber-soft)" stroke="var(--amber)"/><text x="210" y="168" fill="var(--amber)">Backpressure</text><text x="210" y="186" fill="var(--muted)" font-size="10.5" font-weight="500">queue full → 429</text>
+      <rect x="300" y="150" width="150" height="46" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="375" y="172" fill="var(--accent-ink)">Parent job</text><text x="375" y="188" fill="var(--muted)" font-size="10.5" font-weight="500">waiting-children</text>
+      <rect x="540" y="150" width="108" height="46" rx="10" fill="var(--green-soft)" stroke="var(--green)"/><text x="594" y="178" fill="var(--green)">Document done</text>
+    </g>
+    <!-- stage-to-stage arrows -->
+    <g fill="none" stroke="var(--accent)" stroke-width="2.2" marker-end="url(#g42q-ar)">
+      <path d="M162 57 L176 57"/>
+      <path d="M276 57 L290 57"/>
+      <path d="M390 57 L404 57"/>
+      <path d="M504 57 L518 57"/>
+      <path d="M122 173 L146 173"/>
+      <path d="M270 173 L296 173"/>
+      <path d="M375 150 C 230 130, 118 110, 114 84"/>
+      <path d="M570 80 C 582 112, 592 120, 594 146"/>
+    </g>
+    <text x="250" y="118" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="10.5" fill="var(--faint)" text-anchor="middle">fan out to stage queues</text>
+    <text x="628" y="118" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="10.5" fill="var(--faint)" text-anchor="middle">all children done</text>
+  </svg>
+  <figcaption>One document becomes a tree of stage jobs. The backpressure gate sheds load at the door (429); the parent waits in <em>waiting-children</em> until every retrying stage finishes, so a half-ingested document never looks done.</figcaption>
+</figure>
 <pre><code>from redis import Redis
 from rq import Queue                                 <span class="cmt"># RQ here for brevity; BullMQ FlowProducer is the Node equivalent</span>
 
@@ -14440,6 +14478,49 @@ print("enqueued parse → embed → index for one document; workers run them wit
     return f"deleted {source_id} across {len(stores)} stores"
 </code></pre>
 <div class="out"><div class="lbl">▶ Output</div><p><code>deleted s3:policies/old_fee_schedule.pdf across 5 stores</code></p></div>
+
+<figure>
+  <svg viewBox="0 0 680 270" role="img" aria-label="The deletion saga. A delete request first writes a tombstone so retrieval excludes the id instantly. It then fans out retryable deletes to five stores: vector index, columnar rows, graph nodes, object store raw file, and manifest row. A background reconciler sweeps any orphaned vectors a failed step left behind.">
+    <defs>
+      <marker id="g42del-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+      <marker id="g42del-rar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--green)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">
+      <!-- trigger -->
+      <rect x="18" y="112" width="96" height="46" rx="10" fill="var(--slate-soft)" stroke="var(--muted)"/><text x="66" y="140" fill="var(--ink)">Delete source</text>
+      <!-- tombstone -->
+      <rect x="140" y="106" width="130" height="58" rx="12" fill="var(--amber-soft)" stroke="var(--amber)"/><text x="205" y="130" fill="var(--amber)">① Tombstone</text><text x="205" y="148" fill="var(--muted)" font-size="10.5" font-weight="500">retrieval excludes id now</text>
+      <!-- five stores -->
+      <rect x="470" y="14"  width="196" height="34" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="568" y="36" fill="var(--accent-ink)">Vector index</text>
+      <rect x="470" y="58"  width="196" height="34" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="568" y="80" fill="var(--accent-ink)">Columnar rows</text>
+      <rect x="470" y="102" width="196" height="34" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="568" y="124" fill="var(--accent-ink)">Graph nodes</text>
+      <rect x="470" y="146" width="196" height="34" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="568" y="168" fill="var(--accent-ink)">Object store (raw file)</text>
+      <rect x="470" y="190" width="196" height="34" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="568" y="212" fill="var(--accent-ink)">Manifest row</text>
+      <!-- reconciler -->
+      <rect x="150" y="214" width="250" height="44" rx="10" fill="var(--green-soft)" stroke="var(--green)"/><text x="275" y="236" fill="var(--green)">③ Reconciler sweeps orphans</text><text x="275" y="251" fill="var(--muted)" font-size="10" font-weight="500">vectors with no live manifest row</text>
+    </g>
+    <text x="378" y="104" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="10.5" fill="var(--faint)" text-anchor="middle">② fan out retryable deletes</text>
+    <!-- arrows -->
+    <g fill="none" stroke="var(--accent)" stroke-width="2.2" marker-end="url(#g42del-ar)">
+      <path d="M114 135 L136 135"/>
+      <path d="M270 128 C 360 70, 400 40, 466 32"/>
+      <path d="M270 132 C 360 95, 400 78, 466 75"/>
+      <path d="M270 135 L466 119"/>
+      <path d="M270 140 C 360 150, 400 160, 466 163"/>
+      <path d="M270 148 C 360 185, 400 200, 466 207"/>
+    </g>
+    <g fill="none" stroke="var(--green)" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#g42del-rar)">
+      <path d="M400 232 C 460 232, 540 232, 568 228"/>
+      <path d="M418 220 C 470 180, 540 90, 566 50"/>
+    </g>
+  </svg>
+  <figcaption>Delete is a saga, not a <code>DELETE</code>. The tombstone stops exposure instantly; retryable jobs fan out to all five stores; the reconciler catches whatever a failed step left behind, so a partial delete can never keep serving deleted content.</figcaption>
+</figure>
+
 <div class="warn">
   <div class="lbl">⚠ Watch out</div>
   <p>The dangerous failure is a <em>partial</em> delete: vectors gone but graph edges or ClickHouse rows left behind, so a question can still surface the deleted content through another path. Tombstone-then-reconcile is what makes it safe — the tombstone stops exposure instantly, the reconciler guarantees eventual full removal. For "right to be forgotten," the raw file in S3 must go too, not just the index.</p>
@@ -34786,6 +34867,148 @@ async with await session.connect() as conn:            <span class="cmt"># open 
 </section>
 
 <section class="topic">
+<h3>Inside the ears and mouth: how ASR and TTS actually work, end to end</h3>
+<p class="lede">Before the API knobs, the mechanism. This topic opens the black box: how a sound wave becomes text a model can read, and how text becomes a wave a phone can play, every stage with a picture.</p>
+
+<p>So far the "ears" and "mouth" have been boxes you call. To reason about latency, accuracy and the odd failures, you need to see <em>inside</em> them. Both directions share one idea: <strong>neural models don't work on raw sound — they work on a compact picture of it, a frame at a time.</strong> Let's build that up from the physics.</p>
+
+<h4>Step 0 — what sound even is, to a computer</h4>
+<p>Sound is a pressure wave. A microphone measures its height many thousands of times a second; each measurement is a number. Three terms describe the result:</p>
+<ul>
+<li><strong>Sample rate</strong> — how many measurements per second. Phones use <strong>8 kHz</strong> (8,000/sec), wideband voice <strong>16 kHz</strong>, TTS output often <strong>24 kHz</strong>. The rule (Nyquist): you can only capture frequencies up to <em>half</em> the sample rate, so an 8 kHz phone line tops out at 4 kHz — which is why "s" and "f" sound alike on a call and ASR confuses them.</li>
+<li><strong>Bit depth</strong> — how precise each measurement is (16-bit is standard). The raw stream of these numbers is <strong>PCM</strong> (what a <code>.wav</code> holds, and what <code>G.711</code> lightly compresses for the wire).</li>
+<li><strong>Frame</strong> — models don't look at single samples; they chop the stream into short overlapping windows of <strong>10–25 ms</strong>. Each frame is one "slice" the model processes.</li>
+</ul>
+
+<h4>Step 1 — waveform → features (the spectrogram)</h4>
+<p>A raw waveform is hard for a model to read. So each frame is passed through an <strong>FFT</strong> (Fast Fourier Transform), which splits it into <em>how much energy sits at each pitch</em>. Stack those per-frame spectra side by side and you get a <strong>spectrogram</strong> — a heat-map of pitch over time. Warp the pitch axis to match human hearing (we hear low pitches more finely) and it becomes a <strong>mel-spectrogram</strong>. This is the actual input to almost every speech model: not sound, but a picture of sound.</p>
+
+<figure>
+  <svg viewBox="0 0 640 210" role="img" aria-label="Automatic speech recognition pipeline. A waveform is framed into short windows, each run through an FFT to build a mel-spectrogram. A neural encoder turns the spectrogram frames into token probabilities. A decoder using CTC, a transducer, or attention aligns the many audio frames to the far fewer text tokens and emits the transcript.">
+    <defs>
+      <marker id="g95int-asr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="10.5" font-weight="600" text-anchor="middle">
+      <rect x="10" y="78" width="96" height="48" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="58" y="98" fill="var(--accent-ink)">🎙 Waveform</text>
+      <text x="58" y="113" fill="var(--muted)" font-size="8.5" font-weight="500">PCM · 8–16 kHz</text>
+
+      <rect x="124" y="78" width="96" height="48" rx="10" fill="var(--surface)" stroke="var(--accent)"/>
+      <text x="172" y="94" fill="var(--accent-ink)">Frame + FFT</text>
+      <text x="172" y="108" fill="var(--muted)" font-size="8.5" font-weight="500">10–25 ms slices</text>
+      <text x="172" y="120" fill="var(--muted)" font-size="8.5" font-weight="500">→ mel-spectrogram</text>
+
+      <rect x="238" y="78" width="96" height="48" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="2.1"/>
+      <text x="286" y="98" fill="var(--accent-ink)">Encoder</text>
+      <text x="286" y="113" fill="var(--muted)" font-size="8.5" font-weight="500">frames → probs</text>
+
+      <rect x="352" y="78" width="110" height="48" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="2.1"/>
+      <text x="407" y="94" fill="var(--accent-ink)">Align + decode</text>
+      <text x="407" y="108" fill="var(--muted)" font-size="8.5" font-weight="500">CTC · RNN-T ·</text>
+      <text x="407" y="120" fill="var(--muted)" font-size="8.5" font-weight="500">attention</text>
+
+      <rect x="480" y="78" width="150" height="48" rx="10" fill="var(--green-soft)" stroke="var(--green)"/>
+      <text x="555" y="98" fill="var(--green)">"move my money"</text>
+      <text x="555" y="113" fill="var(--muted)" font-size="8.5" font-weight="500">text tokens</text>
+
+      <text x="320" y="155" fill="var(--faint)" font-size="9" font-weight="500">~100 frames/sec of audio  →  a handful of words: the alignment problem</text>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="2.1" marker-end="url(#g95int-asr)">
+      <path d="M106 102 L122 102"/><path d="M220 102 L236 102"/><path d="M334 102 L350 102"/><path d="M462 102 L478 102"/>
+    </g>
+  </svg>
+  <figcaption>ASR, end to end: waveform → framed mel-spectrogram → neural encoder → an alignment/decode step that maps ~100 audio frames a second onto a few text tokens.</figcaption>
+</figure>
+
+<h4>Step 2 — features → text (how ASR decodes)</h4>
+<p>A neural <strong>encoder</strong> turns each mel frame into a probability over sound-units (phonemes or sub-word tokens). Now the hard part: there are ~100 frames a second but only a few words, and nothing says <em>which</em> frames belong to which letter. That's the <strong>alignment problem</strong>, and there are three standard solutions — the ones every ASR engine is built on:</p>
+<ul>
+<li><strong>CTC</strong> (Connectionist Temporal Classification) — adds a "blank" token and lets the model emit letters frame by frame, then collapses repeats and blanks ("hhh_ee_lll_oo" → "hello"). Simple and fast, but each frame is judged fairly independently.</li>
+<li><strong>RNN-T / Transducer</strong> — the streaming favourite (Deepgram's Nova family, most phone ASR). It predicts the next token conditioned on both the audio <em>and</em> the words so far, so it can emit text the instant enough audio has arrived. This is what makes word-by-word streaming on a live call possible.</li>
+<li><strong>Attention encoder-decoder (seq2seq)</strong> — Whisper-style: the decoder attends over the whole encoded clip and generates text like a translation. Very accurate, but it wants a <em>window</em> of audio, so it's more batch-friendly than truly streaming.</li>
+</ul>
+<p>Then <strong>decoding</strong> picks the best word sequence — greedy, or <strong>beam search</strong> (keep several candidates alive). Biasing (your <code>keywords</code> list) works <em>here</em>: it tips the probabilities toward "FlexiSaver" so the decoder stops preferring the ordinary "flexi saver."</p>
+
+<h4>Step 3 — text → speech (how TTS builds a wave)</h4>
+<p>The mouth runs the pipeline in reverse, and it is a genuine pipeline, not one leap:</p>
+<ul>
+<li><strong>Text normalisation</strong> — expand anything that isn't a plain word: "£20.50" → "twenty pounds fifty", "card ending 4471" stays, "2026" → "twenty twenty-six". Get this wrong and the voice says "two thousand and twenty-six pounds".</li>
+<li><strong>Grapheme-to-phoneme (G2P)</strong> — turn letters into <em>sounds</em> (phonemes), because spelling lies ("sort code" isn't "s-o-r-t"). This fixes pronunciation of names and jargon.</li>
+<li><strong>Acoustic model</strong> — phonemes + desired prosody (rhythm, stress, intonation) → a <strong>mel-spectrogram</strong> of the target speech. Classic names: Tacotron (autoregressive, one frame at a time) and FastSpeech (non-autoregressive, all frames at once — faster, steadier).</li>
+<li><strong>Vocoder</strong> — convert that mel-spectrogram into an actual waveform you can play. HiFi-GAN and WaveNet-style neural vocoders live here; this is where "robotic vs natural" is won or lost.</li>
+</ul>
+<p>Modern systems increasingly fuse these into one <strong>neural model that emits audio tokens</strong> directly (the same trick speech-native models use), but the stages above are still what's happening conceptually — and why a name mispronunciation is usually a G2P problem, not a "bad model".</p>
+
+<figure>
+  <svg viewBox="0 0 640 170" role="img" aria-label="Text-to-speech pipeline. Input text is normalised, converted from letters to phonemes, passed to an acoustic model that produces a mel-spectrogram with prosody, and finally a neural vocoder turns the spectrogram into an audio waveform. Streaming synthesis begins vocoding the first chunk while later text is still being processed.">
+    <defs>
+      <marker id="g95int-tts" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="600" text-anchor="middle">
+      <rect x="8" y="58" width="92" height="46" rx="10" fill="var(--green-soft)" stroke="var(--green)"/>
+      <text x="54" y="78" fill="var(--green)">"£20 moved"</text>
+      <text x="54" y="92" fill="var(--muted)" font-size="8.5" font-weight="500">text</text>
+
+      <rect x="116" y="58" width="92" height="46" rx="10" fill="var(--surface)" stroke="var(--accent)"/>
+      <text x="162" y="74" fill="var(--accent-ink)">Normalise</text>
+      <text x="162" y="88" fill="var(--muted)" font-size="8" font-weight="500">"twenty pounds"</text>
+
+      <rect x="224" y="58" width="92" height="46" rx="10" fill="var(--surface)" stroke="var(--accent)"/>
+      <text x="270" y="74" fill="var(--accent-ink)">G2P</text>
+      <text x="270" y="88" fill="var(--muted)" font-size="8" font-weight="500">letters → phonemes</text>
+
+      <rect x="332" y="58" width="100" height="46" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="2.1"/>
+      <text x="382" y="74" fill="var(--accent-ink)">Acoustic model</text>
+      <text x="382" y="88" fill="var(--muted)" font-size="8" font-weight="500">→ mel + prosody</text>
+
+      <rect x="448" y="58" width="92" height="46" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="2.1"/>
+      <text x="494" y="74" fill="var(--accent-ink)">Vocoder</text>
+      <text x="494" y="88" fill="var(--muted)" font-size="8" font-weight="500">mel → wave</text>
+
+      <rect x="556" y="58" width="78" height="46" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="595" y="78" fill="var(--accent-ink)">🔊 Audio</text>
+      <text x="595" y="92" fill="var(--muted)" font-size="8.5" font-weight="500">24 kHz</text>
+
+      <text x="320" y="132" fill="var(--faint)" font-size="9" font-weight="500">streaming: vocode the first chunk while later text is still being processed</text>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="2.1" marker-end="url(#g95int-tts)">
+      <path d="M100 81 L114 81"/><path d="M208 81 L222 81"/><path d="M316 81 L330 81"/><path d="M432 81 L446 81"/><path d="M540 81 L554 81"/>
+    </g>
+  </svg>
+  <figcaption>TTS, end to end: text → normalise → phonemes (G2P) → acoustic model (mel + prosody) → neural vocoder → playable waveform, streamed chunk by chunk.</figcaption>
+</figure>
+
+<h4>And the speech-native shortcut</h4>
+<p>A speech-native model (the OpenAI Realtime API's approach) collapses most of this. An audio encoder turns the incoming wave into <strong>discrete audio tokens</strong>; one transformer reasons over interleaved <em>audio and text</em> tokens; an audio decoder emits output tokens that become speech. There's no text bottleneck in the middle, so it keeps tone and emotion and cuts a hop of latency. The trade is observability: there's no clean intermediate transcript to log and inspect, which is exactly why banks often keep the cascade (STT → LLM → TTS) where every stage leaves a trace.</p>
+
+<div class="story">
+  <div class="lbl">🏦 Picture this</div>
+  <p>A caller says "move twenty from FlexiSaver." BankAssist's phone leg is <strong>8 kHz</strong>, so the recogniser's mel-spectrogram simply has no detail above 4 kHz — the "f" in FlexiSaver is acoustically thin. The RNN-T decoder, nudged by the <code>keywords</code> bias, still picks "FlexiSaver" over "flexi saver." On the way back, text normalisation turns "£20" into "twenty pounds", G2P keeps "FlexiSaver" pronounced right, and the vocoder streams the first words in ~200 ms so the caller hears a reply almost immediately. Every odd behaviour on that call traces to one of these stages, not to "the AI."</p>
+</div>
+
+<div class="card">
+  <div class="lbl">⚙️ In production</div>
+  <p>Knowing the internals changes what you measure and fix. <strong>Accuracy:</strong> most "mishears" are the 8 kHz band limit plus weak biasing, so widen the band where you can (16 kHz if the carrier allows) and keep the keyterm list fresh — retraining is rarely the first answer. <strong>Latency:</strong> the vocoder and the acoustic model's autoregressive steps dominate TTS time, which is why streaming (vocode-while-generating) and non-autoregressive models matter; on ASR, transducers stream and attention models don't, so pick the family for the job. <strong>Pronunciation bugs</strong> are G2P problems — fix them with a lexicon/phoneme override, not a bigger model. <strong>For a bank:</strong> the mel-spectrogram and any audio tokens are still voice data derived from the caller — treat them with the same PII controls as the transcript. And prefer the cascade when you need a per-stage audit trail; reach for speech-native only when the latency and naturalness win outweighs losing the clean transcript.</p>
+</div>
+
+<div class="qa">
+  <div class="q">Q. Why does a phone bot mishear "s" and "f", and which part of the pipeline is to blame?</div>
+  <div class="a">A. The phone leg samples at <strong>8 kHz</strong>, so by Nyquist it captures nothing above 4 kHz — and the high-frequency energy that distinguishes "s" from "f" lives up there. It's lost before any model runs: the mel-spectrogram simply doesn't contain it, so the encoder can't recover it. <strong>Strong answer adds:</strong> mitigations are keyterm biasing (tips the decoder's probabilities), a wider band (16 kHz / HD voice) where the carrier supports it, and DTMF for anything that must be exact (card/account digits); it's a signal-bandwidth problem, not a model-size one.</div>
+</div>
+
+<div class="remember">
+  <div class="lbl">🧠 Remember it</div>
+  <p><strong>Both directions run on a <em>picture</em> of sound, the mel-spectrogram.</strong> ASR: wave → mel → encoder → align (CTC / RNN-T / attention) → text. TTS: text → normalise → phonemes → mel → vocoder → wave. Speech-native skips the middle with audio tokens — faster, but no transcript to audit.</p>
+</div>
+
+<p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🧠 internals</span> <span class="chip">🔊 voice</span> <span class="chip">⚡ latency</span></p>
+</section>
+
+<section class="topic">
 <h3>Speech-to-text, up close: streaming, keyword biasing, timestamps &amp; diarization</h3>
 <p class="lede">The transcription endpoint does far more than hand back a string. Streamed words, a list of your product names to listen for, who-said-what, and when each word landed — these are the knobs that turn "it mostly works" into "it works on a noisy phone line."</p>
 
@@ -35673,6 +35896,232 @@ agent = Agent(                                      <span class="cmt"># the pers
   <div class="lbl">🧠 Remember it</div>
   <p>The framework runs the <strong>media plane</strong> (WebRTC, STUN/TURN, SFU rooms, SIP trunks) so you can focus on the <strong>pipeline</strong> (STT → LLM → TTS). <strong>LiveKit</strong> = the backbone, <strong>Pipecat</strong> = the open pipeline, <strong>Vapi</strong> = the managed shortcut. And always test TURN.</p>
 </div>
+</section>
+
+<section class="topic">
+<h3>Telephony for voice bots: SIP, trunks, codecs, IVR &amp; agent transfer — the field guide</h3>
+<p class="lede">The earlier voice topics assume you already know what a "SIP trunk" or a "codec" is. This topic is the plain-English field guide to the whole telephony layer under a phone bot: every term, the IVR and transfer mechanics, the popular tools, and the latency rules that decide whether a call feels human.</p>
+
+<p>A voice bot on a web page is a browser problem. A voice bot on a <em>phone number</em> is a <strong>telephony</strong> problem, and telephony is a 40-year-old world with its own vocabulary. You don't have to master it, but you do have to recognise the words, because every provider doc, every outage, and every latency bug speaks this language. Here it is, grounded in a bank's phone line.</p>
+
+<h4>The words, decoded — the telephony glossary</h4>
+<table>
+<tr><th>Term</th><th>What it is, in one line</th></tr>
+<tr><td><strong>PSTN</strong></td><td>The Public Switched Telephone Network — the old global phone system a normal mobile or landline call rides on.</td></tr>
+<tr><td><strong>ASR / STT</strong></td><td>Automatic Speech Recognition (a.k.a. Speech-To-Text) — the "ears": turns the caller's audio into text as they speak.</td></tr>
+<tr><td><strong>TTS</strong></td><td>Text-To-Speech — the "mouth": turns the bot's reply text into spoken audio.</td></tr>
+<tr><td><strong>SIP</strong></td><td>Session Initiation Protocol — the <em>signalling</em> that sets up, changes and ends a call (ring, answer, hang up, transfer). It carries no audio itself.</td></tr>
+<tr><td><strong>SIP trunk</strong></td><td>A virtual "phone line" from a provider that connects your software to the PSTN. The on-ramp between a real call and your digital pipeline. Capacity is counted in <strong>channels</strong> (how many simultaneous calls).</td></tr>
+<tr><td><strong>SIP URI (the "URL")</strong></td><td>An address for a call endpoint, like an email address: <code>sip:bankassist@voip.bank.com</code>. It's how one SIP system dials another. (Separately, your provider calls a <strong>webhook URL</strong> on your server when a call arrives — that's the other "URL" people mean.)</td></tr>
+<tr><td><strong>DID</strong></td><td>Direct Inward Dialing number — the actual public phone number customers dial (your "+44 20…" line). You rent DIDs from the trunk provider.</td></tr>
+<tr><td><strong>RTP</strong></td><td>Real-time Transport Protocol — the packets that carry the <em>audio</em> once SIP has set the call up. SIP signals; RTP streams the voice.</td></tr>
+<tr><td><strong>Codec</strong></td><td>How the audio is compressed on the wire. Phone legs are almost always <strong>G.711</strong> (μ-law in the US/"PCMU", a-law in the EU/"PCMA"): 8 kHz, mono, 64 kbit/s. Browser/app legs use <strong>Opus</strong> (wideband, higher quality). <strong>G.722</strong> is HD voice.</td></tr>
+<tr><td><strong>SBC</strong></td><td>Session Border Controller — the security-and-translation gateway at the edge of a telephony network. It polices SIP, hides your internals, and <em>transcodes</em> codecs when two legs don't match.</td></tr>
+<tr><td><strong>DTMF</strong></td><td>The touch-tones a keypad makes ("press 1 for balance"). Still the reliable way to collect digits like a card or account number on a noisy line.</td></tr>
+<tr><td><strong>VAD / endpointing</strong></td><td>Voice Activity Detection spots when the caller is talking; <strong>endpointing</strong> (turn detection) decides when they've <em>finished</em> so the bot can reply. The single biggest "feels natural" lever.</td></tr>
+<tr><td><strong>Barge-in</strong></td><td>Letting the caller interrupt the bot mid-sentence and having it stop speaking instantly. Without it, the bot feels like a hold recording.</td></tr>
+<tr><td><strong>IVR</strong></td><td>Interactive Voice Response — the menu system ("press or say 1 for accounts"). A voice bot often <em>replaces</em> the IVR, or lives behind one menu branch of it.</td></tr>
+</table>
+
+<figure>
+  <svg viewBox="0 0 640 250" role="img" aria-label="A phone call's path to a voice bot and on to a human. A PSTN caller reaches a Session Border Controller, which connects over a SIP trunk carrying SIP signalling and RTP audio into the voice-agent stack running speech-to-text, the language model, and text-to-speech. When the caller needs a person, a SIP REFER or a bridged consult leg transfers the call to a human agent, passing the gathered context along.">
+    <defs>
+      <marker id="g95tel-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" font-weight="600" text-anchor="middle">
+      <rect x="12" y="92" width="92" height="44" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="58" y="112" fill="var(--accent-ink)">📞 Caller</text>
+      <text x="58" y="127" fill="var(--muted)" font-size="9" font-weight="500">PSTN · DID</text>
+
+      <rect x="132" y="92" width="92" height="44" rx="10" fill="var(--surface)" stroke="var(--accent)"/>
+      <text x="178" y="112" fill="var(--accent-ink)">SBC</text>
+      <text x="178" y="127" fill="var(--muted)" font-size="9" font-weight="500">edge · transcode</text>
+
+      <rect x="252" y="92" width="100" height="44" rx="10" fill="var(--surface)" stroke="var(--accent)"/>
+      <text x="302" y="109" fill="var(--accent-ink)">SIP trunk</text>
+      <text x="302" y="124" fill="var(--muted)" font-size="8.5" font-weight="500">SIP + RTP · G.711</text>
+
+      <rect x="384" y="78" width="150" height="72" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2.2"/>
+      <text x="459" y="98" fill="var(--accent-ink)">Voice-agent stack</text>
+      <text x="459" y="114" fill="var(--muted)" font-size="9" font-weight="500">STT → LLM → TTS</text>
+      <text x="459" y="130" fill="var(--muted)" font-size="9" font-weight="500">VAD · barge-in</text>
+
+      <rect x="470" y="196" width="150" height="42" rx="11" fill="var(--amber-soft)" stroke="var(--amber)"/>
+      <text x="545" y="214" fill="var(--amber)" font-size="10.5">🧑 Human agent</text>
+      <text x="545" y="229" fill="var(--muted)" font-size="8.5" font-weight="500">REFER / consult + bridge</text>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="2.1" marker-end="url(#g95tel-ar)">
+      <path d="M104 114 L128 114"/>
+      <path d="M224 114 L248 114"/>
+      <path d="M352 114 L380 114"/>
+    </g>
+    <g fill="none" stroke="var(--amber)" stroke-width="2.1" stroke-dasharray="5 4" marker-end="url(#g95tel-ar)">
+      <path d="M459 150 L520 194"/>
+    </g>
+    <text x="490" y="176" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="9" fill="var(--faint)" text-anchor="middle">transfer + context</text>
+  </svg>
+  <figcaption>A call's journey: PSTN caller → SBC → SIP trunk (SIP signalling + RTP audio) → the STT→LLM→TTS stack, with a transfer leg to a human when needed.</figcaption>
+</figure>
+
+<h4>The SIP messages — a call's whole lifecycle, INVITE to BYE</h4>
+<p>SIP looks a lot like HTTP: the caller's side sends <strong>requests</strong> (called <em>methods</em>), the other side replies with <strong>3-digit response codes</strong> (same families as HTTP — 1xx provisional, 2xx success, 4xx/5xx/6xx failures). You rarely hand-write these, but you'll read them in every trace and every support ticket, so know the cast.</p>
+<table>
+<tr><th>Message</th><th>Kind</th><th>What it does</th></tr>
+<tr><td><strong>REGISTER</strong></td><td>method</td><td>Tells the server "this endpoint is reachable here" — the SIP equivalent of logging in / publishing your address.</td></tr>
+<tr><td><strong>INVITE</strong></td><td>method</td><td>Starts a call and offers media (codecs, IP/port) via SDP. The opening handshake.</td></tr>
+<tr><td><strong>100 Trying</strong></td><td>1xx</td><td>"Got your INVITE, working on it." Provisional, no action needed.</td></tr>
+<tr><td><strong>180 Ringing</strong> / <strong>183 Session Progress</strong></td><td>1xx</td><td>The far end is ringing (180), or early media is flowing like a ringback or IVR prompt (183).</td></tr>
+<tr><td><strong>200 OK</strong></td><td>2xx</td><td>Answered — carries the media answer. The call is agreed.</td></tr>
+<tr><td><strong>ACK</strong></td><td>method</td><td>Confirms the 200 OK. After ACK the call is fully up and RTP audio flows.</td></tr>
+<tr><td><strong>BYE</strong></td><td>method</td><td>Hangs up an established call. Either side can send it; the other replies 200 OK.</td></tr>
+<tr><td><strong>CANCEL</strong></td><td>method</td><td>Aborts an INVITE that hasn't been answered yet (caller gave up while it rang).</td></tr>
+<tr><td><strong>re-INVITE</strong> / <strong>UPDATE</strong></td><td>method</td><td>Changes a call already in progress: put on hold, swap codec, add video, move media after a transfer.</td></tr>
+<tr><td><strong>REFER</strong></td><td>method</td><td>"Please transfer this call to that address." The method behind blind/cold transfers.</td></tr>
+<tr><td><strong>NOTIFY</strong> / <strong>SUBSCRIBE</strong></td><td>method</td><td>Event updates — e.g. the progress of a REFER transfer, or message-waiting indicators.</td></tr>
+<tr><td><strong>OPTIONS</strong></td><td>method</td><td>"Are you alive / what can you do?" — used as a keep-alive ping and capability check on a trunk.</td></tr>
+<tr><td><strong>INFO</strong> / <strong>MESSAGE</strong></td><td>method</td><td>Mid-call info (sometimes DTMF digits) / a SIP instant message.</td></tr>
+<tr><td><strong>4xx / 5xx / 6xx</strong></td><td>failures</td><td>e.g. <code>401/407</code> auth needed, <code>404</code> not found, <code>486</code> Busy Here, <code>503</code> Service Unavailable, <code>603</code> Decline.</td></tr>
+</table>
+<figure>
+  <svg viewBox="0 0 640 220" role="img" aria-label="A SIP call-flow ladder between a caller and a callee. The caller sends INVITE; the callee returns 100 Trying, then 180 Ringing, then 200 OK; the caller sends ACK; RTP audio flows both ways; finally one side sends BYE and the other replies 200 OK.">
+    <defs>
+      <marker id="g95sip-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="11" font-weight="700" text-anchor="middle">
+      <text x="90" y="20" fill="var(--accent-ink)">Caller</text>
+      <text x="550" y="20" fill="var(--accent-ink)">Callee</text>
+    </g>
+    <g stroke="var(--line)" stroke-width="1.4"><path d="M90 28 L90 200"/><path d="M550 28 L550 200"/></g>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="600" text-anchor="middle" fill="var(--muted)">
+      <text x="320" y="44">INVITE →</text>
+      <text x="320" y="72">← 100 Trying</text>
+      <text x="320" y="100">← 180 Ringing</text>
+      <text x="320" y="128">← 200 OK</text>
+      <text x="320" y="156">ACK →</text>
+      <text x="320" y="196">BYE → · ← 200 OK</text>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#g95sip-ar)">
+      <path d="M92 48 L548 48"/>
+      <path d="M548 76 L92 76"/>
+      <path d="M548 104 L92 104"/>
+      <path d="M548 132 L92 132"/>
+      <path d="M92 160 L548 160"/>
+    </g>
+    <rect x="150" y="168" width="340" height="18" rx="5" fill="var(--green-soft)" stroke="var(--green)"/>
+    <text x="320" y="181" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="9.5" font-weight="600" fill="var(--green)" text-anchor="middle">◀ RTP audio (both ways) ▶</text>
+  </svg>
+  <figcaption>The happy path: INVITE → 100 → 180 → 200 OK → ACK, then RTP audio flows, and BYE → 200 OK tears it down. REFER (transfer) and re-INVITE (hold/codec change) slot in while the call is up.</figcaption>
+</figure>
+
+<h4>SIP transports — UDP, TCP, TLS, and SIP over WebSocket (the WebRTC bridge)</h4>
+<p>SIP is just the signalling text; <em>how</em> those messages travel is a separate choice, and it matters for security and for browsers.</p>
+<ul>
+<li><strong>UDP</strong> (port 5060) — the classic default. Fast, connectionless, fine on managed carrier links; messages can fragment if large.</li>
+<li><strong>TCP</strong> — reliable delivery for big SIP messages (lots of codecs/headers) and flaky networks.</li>
+<li><strong>TLS</strong> (port 5061, "SIPS") — SIP encrypted in transit so signalling can't be sniffed or spoofed. Pair it with <strong>SRTP</strong> (encrypted RTP) to protect the audio too. This is the norm for anything crossing the public internet.</li>
+<li><strong>SIP over WebSocket</strong> (RFC 7118) — SIP messages carried inside a <strong>WebSocket</strong> so a <em>browser</em> can speak SIP (libraries like SIP.js / JsSIP). The browser does call setup over the WebSocket and the <strong>audio over WebRTC</strong> (Opus + SRTP). A <strong>WebRTC-to-SIP gateway</strong> then bridges that browser leg to a normal SIP trunk and the PSTN.</li>
+</ul>
+<p>How this ties to AI voice: a phone caller arrives as plain SIP+RTP on the trunk; a browser/app caller arrives as SIP-over-WebSocket + WebRTC. The media plane (previous topic) is what bridges either one into your STT→LLM→TTS stack. So "SIP over WebSocket/WebRTC" isn't a different SIP — it's the <em>same</em> SIP methods (INVITE, 200 OK, BYE, REFER) riding a browser-friendly transport, with the audio on WebRTC instead of raw RTP.</p>
+
+<h4>IVR — the menu, and how a bot changes it</h4>
+<p>The classic IVR is a decision tree: "Press 1 for balances, 2 for cards, 0 for an agent." It's cheap, predictable, and callers hate the deep ones. A voice bot upgrades this in one of two shapes:</p>
+<ul>
+<li><strong>Bot replaces the IVR</strong> — the caller just says what they want ("I think my card's been cloned") and the bot routes intent directly, no menu. Natural, but every path now depends on ASR and your guardrails.</li>
+<li><strong>Bot behind one IVR branch</strong> — keep a thin front menu for routing and compliance, and hand specific branches ("account questions") to the bot. Common in banks because it bounds where the AI can act.</li>
+</ul>
+<p>Two IVR habits survive into the AI era because they just work: use <strong>DTMF for exact digits</strong> (card numbers, OTPs, menu confirmations) since tones never mishear on a noisy line, and keep a <strong>"zero for a human" escape hatch</strong> on every turn. A bot that can't be escaped is a complaint generator.</p>
+
+<h4>Agent transfer — handing a live call to a human</h4>
+<p>The most important flow a bank bot has is the graceful handoff. There are two kinds, and the difference is whether the human is briefed first.</p>
+<ul>
+<li><strong>Cold (blind) transfer</strong> — connect the caller to the human (or queue) immediately and drop off. Simplest. The human starts cold and the caller usually re-explains everything.</li>
+<li><strong>Warm transfer</strong> — the bot first opens a private <strong>consult leg</strong> to the human, speaks (or sends) a briefing — "verified customer, suspected card fraud, card ending 4471" — and only then <strong>bridges</strong> the caller in. The caller never repeats themselves. This is the one customers remember.</li>
+</ul>
+<p>Mechanically it comes down to <strong>SIP REFER</strong> versus a <strong>bridged consult leg</strong>. A plain <code>REFER</code> tells the trunk "re-route this call to that address" and the bot steps out — fast, but it carries <em>no</em> briefing, so it's a cold transfer. A warm transfer keeps both legs up: the bot dials the human on a new <code>INVITE</code>, briefs them, then merges the two calls. Three traps the research is unanimous on:</p>
+<ul>
+<li><strong>Confirm the trunk allows <code>REFER</code> first.</strong> Many trunks and SBCs disable call transfer by default, and the handoff silently fails until it's enabled.</li>
+<li><strong>Pass context in the right place.</strong> On a cold transfer, custom SIP headers ride the <code>REFER</code>; on a warm transfer they ride the <code>INVITE</code> that dials the human, so they reach the leg that actually calls the person.</li>
+<li><strong>Plan for a machine answering.</strong> If the destination is an IVR or voicemail, detect it and mark the transfer failed rather than dumping a confused caller onto a robot.</li>
+</ul>
+<p>Before any transfer, have the bot forward the facts it already verified — identity, account, the reason — so the human doesn't re-ask. And trigger the handoff on <em>deterministic</em> rules in your orchestration (explicit "agent" request, repeated ASR failure, high-risk intent, low confidence), not on the model's whim.</p>
+<pre><code><span class="cmt"># A blind/cold transfer from a LiveKit voice agent: re-route the caller to the human queue.</span>
+<span class="cmt"># (Provider SDKs and exact signatures rotate — check current docs before you ship.)</span>
+from livekit import api
+
+async def transfer_to_human(ctx, caller_identity, reason, verified):
+    <span class="cmt"># Log what we KNOW so the human (and compliance) has it, then hand the call off.</span>
+    note = {"reason": reason, "verified_customer": verified, "card": "ending 4471"}
+    await ctx.api.sip.transfer_sip_participant(
+        api.TransferSIPParticipantRequest(
+            room_name=ctx.room.name,
+            participant_identity=caller_identity,
+            transfer_to="tel:+442079460958",        <span class="cmt"># the agent queue's number, or a sip: URI</span>
+            play_dialtone=True,                      <span class="cmt"># caller hears ringing, not silence, during the switch</span>
+            headers={"X-Context": str(note)},        <span class="cmt"># carry the gathered context on the transfer</span>
+        )
+    )
+    <span class="cmt"># For a WARM transfer instead: dial the human on a second leg, brief them, THEN bridge.</span>
+</code></pre>
+<div class="out"><div class="lbl">▶ Output</div>Caller hears a brief ring, then the human agent on the fraud desk, who already sees "verified customer · suspected card fraud · card ending 4471" — no re-explaining.</div>
+
+<h4>The popular tools — who does what</h4>
+<table>
+<tr><th>Layer</th><th>Popular choices (2026)</th><th>Use it for</th></tr>
+<tr><td>Trunk / DID / PSTN</td><td>Twilio, Telnyx, Plivo, Vonage, SignalWire, Exotel</td><td>Phone numbers, carrier connectivity, SIP trunks, DTMF.</td></tr>
+<tr><td>Media plane / framework</td><td>LiveKit, Pipecat, Vapi</td><td>Moving audio in real time and running the STT→LLM→TTS pipeline (covered in the previous topic).</td></tr>
+<tr><td>ASR / STT</td><td>Deepgram (Nova-3), AssemblyAI, <code>gpt-4o-transcribe</code>, open <code>whisper</code></td><td>Streaming transcription with low latency and keyword biasing.</td></tr>
+<tr><td>TTS</td><td><code>gpt-4o-mini-tts</code>, ElevenLabs, Deepgram Aura, Cartesia</td><td>Natural, streaming, interruptible speech.</td></tr>
+<tr><td>Speech-native</td><td>OpenAI Realtime API</td><td>One model for ears+brain+mouth when ultra-low latency matters more than per-stage control.</td></tr>
+<tr><td>Full contact-centre</td><td>Amazon Connect, Genesys, Twilio Flex</td><td>Queues, routing, human-agent desktops, recording and reporting out of the box.</td></tr>
+</table>
+
+<h4>Latency — the numbers that decide if it feels human</h4>
+<p>On a phone call, silence is brutal: there's no spinner, no typing dots, just dead air. The research converges on a few targets.</p>
+<table>
+<tr><th>Target</th><th>Budget</th><th>Why</th></tr>
+<tr><td>Total response (caller stops → bot starts)</td><td><strong>~800 ms</strong> or less</td><td>The threshold for "natural conversation." Above ~1.2 s callers think the line dropped.</td></tr>
+<tr><td>Turn-taking / end-of-turn detection</td><td><strong>150–300 ms</strong></td><td>Semantic endpointing now beats the old ~500 ms fixed-silence VAD. Too aggressive and the bot cuts the caller off.</td></tr>
+<tr><td>Time-to-first-token / first audio</td><td>As low as possible</td><td>The caller hears nothing until this; it also powers barge-in and lets you start thinking before they finish.</td></tr>
+</table>
+<p>The levers that hit those numbers:</p>
+<ul>
+<li><strong>Stream every stage.</strong> STT emits words as they're spoken, the LLM streams tokens, TTS speaks the first sentence while the rest is still being written. Never wait for a stage to "finish."</li>
+<li><strong>Co-locate with the call.</strong> Put STT, LLM and TTS in the <em>same region</em> as the trunk so audio isn't crossing an ocean each turn.</li>
+<li><strong>Avoid needless transcoding.</strong> Opus→G.711→Opus inside one call wastes milliseconds and quality; keep the phone leg on G.711 μ-law end to end. OpenAI's Realtime API accepts G.711 μ-law natively, so no transcode on the bridge.</li>
+<li><strong>Get barge-in right, not just fast.</strong> A 650 ms agent that stops instantly when interrupted beats a 550 ms one that talks over the caller. Interruption handling matters more than raw speed.</li>
+<li><strong>Use a small, fast model on the call</strong> (<code>gpt-4.1-mini</code> class) and escalate off-call or to a bigger model only for the rare hard turn.</li>
+</ul>
+
+<div class="story">
+  <div class="lbl">🏦 Picture this</div>
+  <p>BankAssist's phone line is a <strong>DID</strong> from Telnyx, landing on a <strong>SIP trunk</strong> into a self-hosted LiveKit stack in the same region. A customer says "my card's been cloned." Deepgram streams the words, the endpointer fires ~250 ms after they stop, <code>gpt-4.1-mini</code> verifies identity with two questions and collects the card's last four via <strong>DTMF</strong> (tones never mishear), and the whole first reply lands in ~700 ms. The intent is high-risk, so a <em>deterministic</em> rule triggers a <strong>warm transfer</strong>: the bot opens a consult leg to the fraud desk, passes "verified customer · suspected cloning · card ending 4471," then bridges the caller in. The human picks up already knowing everything. Total: one call, no repetition, no dead air.</p>
+</div>
+
+<div class="card">
+  <div class="lbl">⚙️ In production</div>
+  <p><strong>Capacity is concurrency-bound:</strong> size SIP <em>channels</em> and stack resources for peak <em>simultaneous</em> calls, not requests per second. <strong>Codecs:</strong> keep the phone leg on G.711 μ-law and only transcode when a leg genuinely needs it — log where the SBC transcodes, it's a hidden latency and quality tax. <strong>Transfers:</strong> confirm the trunk has <code>REFER</code> enabled, carry verified context on the correct SIP leg, and detect IVR/voicemail at the destination. <strong>Observability:</strong> timestamp every hop (trunk in, STT final, LLM first token, TTS first audio, trunk out) so a slow turn points at the exact stage; watch p95 response latency, end-of-turn accuracy, barge-in rate, dropped-call rate and transfer-success rate. <strong>For a bank:</strong> capture recording consent at call start, keep recordings and transcripts in-region and encrypted, authenticate before any account action, and keep money-moving tools behind the same logged, confirmed calls as every other channel. DTMF for secrets (card/OTP) keeps them out of the transcript and the ASR.</p>
+</div>
+
+<div class="warn">
+  <div class="lbl">⚠ Watch out — and when NOT to</div>
+  <p>The commonest failures are boring telephony ones, not AI ones: <code>REFER</code> disabled on the trunk so transfers die; a codec mismatch forcing silent transcoding or, worse, one-way audio; and endpointing tuned too tight so the bot keeps interrupting. <strong>When NOT to</strong> build a full real-time agent: a simple "press 1 for balance" menu or a scripted outbound reminder is cheaper and sturdier as a plain IVR than as an LLM on every turn. And never treat the phone channel as more trusted than chat — caller audio is untrusted input, so authenticate, confirm, and log exactly as you would online.</p>
+</div>
+
+<div class="qa">
+  <div class="q">Q. A caller asks for a human. Walk me through a warm transfer, and name the three things that most often break it.</div>
+  <div class="a">A. A warm transfer opens a private <em>consult leg</em> to the human first, briefs them (verified customer, suspected fraud, card ending 4471), then <em>bridges</em> the caller in so they never re-explain — versus a cold/blind <code>REFER</code> that re-routes instantly with no briefing. <strong>Strong answer adds:</strong> the three classic breakers are (1) the SIP trunk/SBC has <code>REFER</code> or call-transfer <em>disabled</em>; (2) context headers put on the wrong leg (cold rides the <code>REFER</code>, warm rides the <code>INVITE</code> that dials the human); and (3) an IVR or voicemail answering the transfer, which you must detect and mark failed rather than dumping the caller on a robot. Trigger the handoff on deterministic rules (explicit request, repeated ASR failure, high-risk intent), and forward the already-verified identity so the human doesn't re-ask.</div>
+</div>
+
+<div class="remember">
+  <div class="lbl">🧠 Remember it</div>
+  <p><strong>SIP signals the call, RTP carries the voice, a trunk is the on-ramp, G.711 is the phone codec.</strong> Stream every stage and stay under ~800 ms, use DTMF for secret digits, and do a <em>warm</em> transfer (brief, then bridge) with <code>REFER</code> enabled and context on the right leg.</p>
+</div>
+
+<p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span> <span class="chip">📞 telephony</span> <span class="chip">⚡ latency</span></p>
 </section>
 <h2 class="part">Interview Prep — Questions from Basic to Advanced</h2>
 <p class="part-intro">A current (2025–2026) question bank for RAG and agentic-AI engineering roles, graded Basic → Intermediate → Advanced. Each answer is a complete answer you could actually teach: a crisp reply first, then the why, a concrete BankAssist example, the trade-off that decides it, and the extra line a strong candidate adds — then the banking system-design prompts to rehearse.</p>
