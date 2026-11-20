@@ -3740,9 +3740,21 @@ print(resp.choices[0].message.content)          <span class="cmt"># the generate
   <div class="a">A. A plain loop serves one request at a time with crude memory management, so throughput collapses the moment real users arrive. vLLM exists to fix exactly that: <strong>PagedAttention</strong> (OS-style paged KV memory, little waste, far more concurrent users per GPU), continuous batching, prefix caching, and an OpenAI-compatible API so your code barely changes. It's the production default. Reach for <strong>SGLang</strong> when your traffic has heavy <em>shared prefixes</em> — NorthBank's long system prompt and repeated policy passages at the top of thousands of requests — where its RadixAttention reuses the prefix computation and cuts time-to-first-token. <strong>Strong answer adds:</strong> don't pick on someone else's leaderboard — the two trade places release to release; start on vLLM and benchmark SGLang on <em>your</em> prompts only if prefix reuse is high, and note that "OpenAI-compatible" is not byte-identical, so test the specific features (logprobs, structured outputs) you depend on.</div>
 </div>
 
+<h4>Engines vs serving frameworks — the production layer on top</h4>
+<p>The five above are the <strong>inference engine</strong> — the thing that runs the forward pass fast. In production you often wrap that engine in a <strong>serving framework</strong> that adds deployment, autoscaling, multi-model routing, and a REST/gRPC surface. Don't confuse the layers: the engine does tokens-per-second, the framework does ops.</p>
+<table>
+  <tr><th>Framework</th><th>Layer</th><th>When you reach for it</th></tr>
+  <tr><td><strong>NVIDIA Triton + TensorRT-LLM</strong></td><td>serving + engine</td><td>top GPU throughput on NVIDIA; TensorRT-LLM compiles the model, Triton serves it (also non-LLM models)</td></tr>
+  <tr><td><strong>Ray Serve</strong></td><td>serving framework</td><td>scale across many GPUs/nodes and compose multi-step or multi-model pipelines in Python</td></tr>
+  <tr><td><strong>BentoML</strong></td><td>packaging + serving</td><td>package a model and its code into one deployable "Bento" with a standard API</td></tr>
+  <tr><td><strong>KServe</strong></td><td>Kubernetes serving</td><td>model serving as a native Kubernetes resource, with scale-to-zero</td></tr>
+  <tr><td><strong>vLLM / SGLang</strong></td><td>engine (built-in server)</td><td>the default — their own OpenAI-compatible server is enough for most fleets</td></tr>
+</table>
+<p>For most LLM work, vLLM or SGLang's built-in server is all you need. Reach for Triton+TensorRT-LLM when you must squeeze an NVIDIA fleet, Ray Serve when a request fans across models or nodes, and BentoML/KServe when a platform team standardizes how every model ships.</p>
+
 <div class="remember">
   <div class="lbl">🧠 Remember it</div>
-  <p><strong>vLLM/SGLang for the fleet, Ollama/LM Studio for your laptop, TGI for the museum.</strong> All five speak OpenAI, so the code is the same — only the URL moves.</p>
+  <p><strong>vLLM/SGLang for the fleet, Ollama/LM Studio for your laptop, TGI for the museum.</strong> All five speak OpenAI, so the code is the same — only the URL moves. Wrap the engine in <strong>Triton/TensorRT-LLM, Ray Serve, BentoML, or KServe</strong> only when you need the extra ops layer: max NVIDIA throughput, multi-node scaling, or standardized packaging.</p>
 </div>
 </section>
 
@@ -14840,9 +14852,15 @@ for step in range(6):                     <span class="cmt"># PART 3 — the loo
   <div class="a">A. You wrap the model in <strong>tools</strong> (so it can act on the world) and a <strong>loop</strong> (so it can act repeatedly, reacting to each result) — meaning the model, not your code, chooses the next step. <strong>Strong answer adds:</strong> memory and curated context complete the four-part picture, but the loop is the load-bearing part — strip it out and you are back to a single clever call, not an agent. Interviewers listen for whether you name the loop at all; most candidates stop at "it can use tools," which a plain function-calling request also does.</div>
 </div>
 
+<div class="key">
+  <div class="lbl">💡 The word you'll keep hearing: the harness</div>
+  <p>The model is just the brain. The <strong>harness</strong> is the program wrapped around it that actually <em>runs</em> the agent: it sends the prompt, reads the model's reply, <strong>parses the tool calls, executes them, feeds the results back</strong>, keeps the memory and context, and enforces the limits (max steps, token budget, timeouts). The model decides; the harness does everything else. Claude Code, Cursor, and Deep Agents are harnesses; so is the loop you write yourself. Think brain vs nervous-system-and-body — a brilliant brain with no body takes no action.</p>
+  <p>This matters more than it sounds. When you see "model X scores 70% on SWE-bench," most of what moves that number is the harness around the model — the retries, the prompts, the tool wiring — not the raw weights. The same model in a weak harness scores far lower. So two claims are never comparable unless the harness is the same.</p>
+</div>
+
 <div class="remember">
   <div class="lbl">🧠 Remember it</div>
-  <p>An agent is a <strong>model + tools + loop + memory</strong>. Brain decides, hands act, heartbeat repeats, notebook remembers.</p>
+  <p>An agent is a <strong>model + tools + loop + memory</strong>, and the <strong>harness</strong> is the code that holds those three around the model. Brain decides, harness acts, repeats, remembers.</p>
 </div>
 </section>
 
@@ -17691,9 +17709,19 @@ for step in range(MAX_STEPS):        <span class="cmt"># GUARDRAIL 1: never loop
   <div class="a">A. Semantic (a durable fact), episodic (a dated event), and procedural (shared how-to), respectively. The split matters because each maps to a different store, cost profile, and compliance class — not just a tidy taxonomy. <strong>Strong answer adds:</strong> semantic facts are few and high-value so they're often pinned straight onto the desk; episodic grows without bound so it lives in a vector store fetched by relevance, never all loaded; procedural is one shared copy in the system prompt and tool definitions, versioned with the code. Only semantic and episodic are personal data (GDPR/CCPA) needing encryption, retention limits, and a working delete path — procedural is governed like code. And a volatile fact like "travelling next week" is episodic-with-TTL, not a semantic truth.</div>
 </div>
 
+<div class="card">
+  <div class="lbl">🗺️ The complete map — where these names come from, and two more</div>
+  <p>The standard reference is the <strong>CoALA</strong> framework, which names <strong>four</strong> memory types: <strong>working</strong> (in-context — the window above), plus the three long-term drawers here — <strong>episodic</strong>, <strong>semantic</strong>, <strong>procedural</strong>. Newer surveys relabel the same ideas (factual = semantic, experiential = episodic) and add <strong>two</strong> more worth knowing:</p>
+  <ul>
+    <li><strong>Entity memory</strong> — semantic facts keyed <em>per entity</em>: one durable record per customer, account, or card. It's the "user profile" view of semantic memory, and it's what the per-customer scoping below actually builds.</li>
+    <li><strong>Sensory memory</strong> — a transient buffer for raw perception before it's understood: the audio frames an ASR model consumes, or image patches a vision model reads. It lasts milliseconds and matters mainly for <strong>voice and multimodal</strong> agents (see the Voice chapter's sample-rate and frame discussion). A text-only bank chat has none.</li>
+  </ul>
+  <p>So the full set is <strong>six</strong>: working, episodic, semantic, procedural, entity, sensory. The first four carry almost every production agent; the last two are refinements you reach for with per-user personalization and with voice/vision.</p>
+</div>
+
 <div class="remember">
   <div class="lbl">🧠 Remember it</div>
-  <p>Three drawers: <strong>Episodic = diary</strong> (what happened), <strong>Semantic = fact sheet</strong> (what's true), <strong>Procedural = handbook</strong> (how we do it).</p>
+  <p>Three drawers: <strong>Episodic = diary</strong> (what happened), <strong>Semantic = fact sheet</strong> (what's true), <strong>Procedural = handbook</strong> (how we do it). Add <strong>working</strong> (the live window), <strong>entity</strong> (one record per customer), and <strong>sensory</strong> (the raw audio/image buffer) and you have the whole map.</p>
 </div>
 </section>
 
@@ -34529,9 +34557,26 @@ Run `pytest -q`. All tests must pass before you finish.
   <div class="a">A. Nothing in the agent itself — it optimises for "tests pass," not "the bank is correct." You supply the judgement: tests you trust, a diff you actually read, no self-merge, and a sandbox with no production secrets or network. <strong>Strong answer adds:</strong> reach for an agent only on open-ended discovery work (write a script when the path is known), feed it an <code>AGENTS.md</code>, and read SWE-bench numbers warily — the scaffolding around the model can swing the score as much as the model itself.</div>
 </div>
 
+<h4>The popular coding harnesses — who's who</h4>
+<p>They all run the same loop; they differ in <em>where</em> they run and how autonomous they are. Grouped by form:</p>
+<table>
+  <tr><th>Harness</th><th>Form</th><th>What makes it notable</th></tr>
+  <tr><td><strong>Claude Code</strong></td><td>terminal + IDE</td><td>Anthropic's own; strong multi-file edits, <code>AGENTS.md</code>, MCP tools, subagents</td></tr>
+  <tr><td><strong>OpenAI Codex</strong></td><td>terminal + cloud</td><td>OpenAI's CLI/cloud agent; runs tasks in an isolated cloud sandbox</td></tr>
+  <tr><td><strong>Cursor</strong></td><td>IDE (fork of VS Code)</td><td>the mainstream AI-IDE; inline edits, agent mode, codebase indexing</td></tr>
+  <tr><td><strong>Windsurf</strong></td><td>IDE</td><td>Cursor's main rival; "Cascade" agent flow across the whole project</td></tr>
+  <tr><td><strong>GitHub Copilot</strong></td><td>IDE + CLI</td><td>the incumbent; completion plus an agent mode, deep GitHub/PR integration</td></tr>
+  <tr><td><strong>Cline / Roo Code</strong></td><td>VS Code extension (open source)</td><td>bring-your-own-model agent in the editor; Roo Code is a Cline fork</td></tr>
+  <tr><td><strong>Aider</strong></td><td>terminal (open source)</td><td>git-native pair programmer; every change is a commit, model-agnostic</td></tr>
+  <tr><td><strong>OpenHands</strong> (ex-OpenDevin)</td><td>autonomous (open source)</td><td>full sandboxed dev environment; the leading open autonomous agent</td></tr>
+  <tr><td><strong>Devin</strong></td><td>autonomous (hosted)</td><td>Cognition's "AI software engineer"; runs long tasks end to end</td></tr>
+  <tr><td><strong>SWE-agent</strong></td><td>research harness (open source)</td><td>Princeton's reference harness behind many SWE-bench results</td></tr>
+</table>
+<p>The split that matters: <strong>in-editor assistants</strong> (Cursor, Windsurf, Copilot, Cline) keep you in the loop on every change, while <strong>autonomous agents</strong> (Devin, OpenHands, and the cloud modes of Claude Code and Codex) take a whole task and come back with a branch. Same engine, different leash length.</p>
+
 <div class="remember">
   <div class="lbl">🧠 Remember it</div>
-  <p>A coding agent = <strong>loop + edit/shell/search tools + your repo as context.</strong> Feed it <code>AGENTS.md</code>, a sharp request, and a sandbox; <strong>read the diff and merge it yourself.</strong></p>
+  <p>A coding agent = <strong>loop + edit/shell/search tools + your repo as context.</strong> Feed it <code>AGENTS.md</code>, a sharp request, and a sandbox; <strong>read the diff and merge it yourself.</strong> The tools differ by <em>leash length</em>: in-editor (Cursor, Windsurf, Copilot, Cline) vs autonomous (Devin, OpenHands, Codex/Claude Code cloud).</p>
 </div>
 </section>
 
