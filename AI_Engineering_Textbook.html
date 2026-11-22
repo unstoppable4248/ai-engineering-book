@@ -326,7 +326,7 @@ tr:last-child td{border-bottom:0}
     <tr><th>Part</th><th>What it covers</th></tr>
     <tr><td><strong>1 · Foundations</strong></td><td>What a language model is and how it picks each word, prompting, the transformer internals (attention, the KV cache, mixture-of-experts), and running models yourself — serving &amp; inference.</td></tr>
     <tr><td><strong>2 · Knowledge Layer (RAG)</strong></td><td>The whole retrieval pipeline in order: ingestion &amp; parsing → chunking → embeddings &amp; vector search → smarter retrieval → agentic and frontier RAG → evaluation.</td></tr>
-    <tr><td><strong>3 · AI Agents</strong></td><td>The agent loop, tools &amp; function calling, reasoning &amp; planning, memory &amp; context engineering, the MCP and A2A protocols, and multi-agent architectures.</td></tr>
+    <tr><td><strong>3 · AI Agents</strong></td><td>The agent loop, tools &amp; function calling, reasoning &amp; planning, memory &amp; context engineering, the MCP and A2A protocols, multi-agent architectures, and a closing recap with production choices.</td></tr>
     <tr><td><strong>4 · Frameworks</strong></td><td>LangChain, LangGraph, LlamaIndex, the OpenAI Agents SDK, CrewAI and their peers — and how to choose one, or do without.</td></tr>
     <tr><td><strong>5 · Evaluation &amp; Production</strong></td><td>Evaluating agents, reliability, observability and cost, and the operations of shipping models (LLMOps) &amp; deployment.</td></tr>
     <tr><td><strong>6 · Security &amp; Governance</strong></td><td>Core defenses — prompt injection, sandboxing, PII, audit — alongside the frameworks, standards, and gateways such as the OWASP Top&nbsp;10, the NIST AI RMF, and the EU AI Act.</td></tr>
@@ -9845,13 +9845,29 @@ vec = emb.embed_query(doc.page_content)             <span class="cmt"># embed th
 <h3>Inside the index: Flat, HNSW, IVF, and PQ</h3>
 <p class="lede">Four index designs power almost every vector database. Each makes a different bet on the recall-speed-memory triangle — and knowing them lets you pick (and tune) the right one for your scale.</p>
 
-<p>"Approximate search" isn't one algorithm; it's a family of index structures. Here are the four you'll actually meet, told as four strategies a librarian might use to find a book fast.</p>
+<p>"Approximate search" isn't one algorithm; it's a family of index structures. Before the four, start from something you already know.</p>
+
+<h4>Start from what you know: the SQL index</h4>
+<p>If you've used a database, you already have the core idea. Without an index, <code>SELECT * FROM customers WHERE id = 42</code> forces a <strong>full table scan</strong> — the database reads every row to find the match. Add an index (a B-tree on <code>id</code>) and it jumps almost instantly to row 42 instead of scanning. You pay for that speed with extra storage and a little slowdown on every write. That is the whole bargain of <em>any</em> index: <strong>spend memory and build-time to make reads fast.</strong></p>
+
+<p>Vector indexes make the exact same bargain. What changes is the <em>question</em>. A SQL index answers <strong>exact</strong> questions on a sortable column: "id equals 42," "name starts with Pri," "amount between 100 and 200." A B-tree works because those values sit on a line you can sort and binary-search. A vector query asks something a B-tree simply cannot: "which of these 10 million 1536-number vectors is <strong>most similar in meaning</strong> to this one?" There is no single column to sort on, and "similar" is a distance across 1536 dimensions, not an equality. So vector databases use different index structures — and most of them give up <em>perfect</em> answers for speed. That trade is <strong>approximate nearest-neighbour (ANN)</strong> search, and its accuracy is measured as <strong>recall</strong>: of the true nearest neighbours, what fraction did it actually find (95%? 99%?).</p>
+
+<table>
+<tr><th>SQL world (you know this)</th><th>Vector world (same idea)</th></tr>
+<tr><td>Full table scan — read every row</td><td><strong>Flat</strong> — compare every vector (exact, slow)</td></tr>
+<tr><td>B-tree / hash index — jump to the row</td><td><strong>HNSW / IVF</strong> — jump to the neighbourhood (fast, approximate)</td></tr>
+<tr><td>Exact match, always right</td><td>Recall % — usually ~95–99%, not 100%</td></tr>
+<tr><td>Index costs storage + slower writes</td><td>Same: RAM + build time to buy fast reads</td></tr>
+<tr><td><code>EXPLAIN</code> to check the index is used</td><td>Recall/latency benchmarks to tune the index</td></tr>
+</table>
+
+<p>Make it concrete. On <strong>1,000,000</strong> vectors: <strong>Flat</strong> compares all 1,000,000 every query; <strong>IVF</strong> (say 1,000 shelves, open the nearest 10) compares only ~10,000; <strong>HNSW</strong> reaches the answer in a few hundred hops. Same answer most of the time, a hundredfold less work. The four designs below are just four kinds of vector index — the way a B-tree, a hash index, and a bitmap index are different SQL indexes — each a different trade of accuracy, speed, memory, and build cost. They're told here as four strategies a librarian might use to find a book fast.</p>
 
 <h4>Flat — read every spine</h4>
-<p><strong>Flat</strong> is the brute-force baseline: compare the query to every vector. Perfect recall, no tuning, but linear slowdown as data grows. Use it up to roughly 10,000–100,000 vectors, or as the ground-truth yardstick for measuring everything else.</p>
+<p><strong>Flat</strong> is the <em>full table scan</em> of vector search: compare the query to every vector. Perfect recall (it literally checks everything), no tuning, but linear slowdown as data grows — twice the data, twice the time. Use it up to roughly 10,000–100,000 vectors, or as the ground-truth yardstick for measuring how much recall the faster indexes give up.</p>
 
 <h4>HNSW — a network of "who's near whom"</h4>
-<p><strong>HNSW</strong> (Hierarchical Navigable Small-World graph) is the default in most vector databases, and the best all-rounder. Picture a social network of vectors: each vector is linked to its nearest neighbours, with a few long-range "express" links layered on top. To search, you drop in anywhere and keep hopping to whichever linked neighbour is closer to the query — like asking "who do you know that's nearer?" and following the chain. You reach the neighbourhood in a handful of hops instead of scanning everything. It's fast with high recall; the price is <strong>memory</strong> — the whole graph plus vectors must sit in RAM. Three knobs tune it:</p>
+<p><strong>HNSW</strong> (Hierarchical Navigable Small-World graph) is the default in most vector databases, and the best all-rounder. Picture a social network of vectors: each vector is linked to its nearest neighbours, with a few long-range "express" links layered on top. To search, you drop in anywhere and keep hopping to whichever linked neighbour is closer to the query — like asking "who do you know that's nearer?" and following the chain. You reach the neighbourhood in a handful of hops instead of scanning everything. It's fast with high recall; the price is <strong>memory</strong> — the whole graph plus vectors must sit in RAM (100 million 768-dim vectors run to roughly 200 GB). Three knobs tune it:</p>
 <ul>
 <li><code>M</code> — how many neighbour links each vector keeps. Higher = better recall, more memory.</li>
 <li><code>efConstruction</code> — how hard it works while <em>building</em> the graph. Higher = better graph, slower build.</li>
@@ -9862,7 +9878,7 @@ vec = emb.embed_query(doc.page_content)             <span class="cmt"># embed th
 <p><strong>IVF</strong> (Inverted File) first <em>clusters</em> all vectors into, say, 1000 groups (<code>nlist</code>), each with a centre. At query time it finds the few nearest cluster-centres and only searches inside those cells (<code>nprobe</code> of them) — ignoring the rest. Far less memory than HNSW; the dial is <code>nprobe</code> (search more cells = higher recall, slower). It needs a quick "training" step to learn the clusters, and suits very large, fairly static collections.</p>
 
 <h4>PQ — shorthand the books to save shelf space</h4>
-<p><strong>PQ</strong> (Product Quantization) is a compression trick, usually bolted onto IVF (giving <strong>IVF-PQ</strong>). It chops each vector into small sub-pieces and replaces each with a short code from a learned codebook — shrinking memory dramatically, at some accuracy cost. It's how you fit <em>billions</em> of vectors in memory. Because the codes are approximate, IVF-PQ is almost always paired with a full-precision rescoring pass (sweep cheap with the codes, judge precise on the survivors).</p>
+<p><strong>PQ</strong> (Product Quantization) is a compression trick, usually bolted onto IVF (giving <strong>IVF-PQ</strong>). It chops each vector into small sub-pieces and replaces each with a short code from a learned codebook — shrinking memory dramatically, at some accuracy cost. Concretely, a 768-dim float32 vector (about 3 KB) shrinks to 30–60 bytes, typically costing 3–7 points of recall that a rescore pass wins back. It's how you fit <em>billions</em> of vectors in memory. Because the codes are approximate, IVF-PQ is almost always paired with a full-precision rescoring pass (sweep cheap with the codes, judge precise on the survivors).</p>
 
 <figure>
   <svg viewBox="0 0 640 300" role="img" aria-label="Three index strategies. Flat scans all dots. HNSW shows a graph of linked dots with a path hopping toward the query. IVF shows dots grouped into labelled cells where only the query's nearest cells are searched.">
@@ -9928,6 +9944,50 @@ vec = emb.embed_query(doc.page_content)             <span class="cmt"># embed th
 <tr><td>IVF</td><td>Tunable (nprobe)</td><td>Fast</td><td>Lower</td><td>Large, mostly-static collections</td></tr>
 <tr><td>IVF-PQ</td><td>Lower (rescore to recover)</td><td>Fast</td><td>Lowest</td><td>Billions of vectors on a budget</td></tr>
 </table>
+
+<h4>How the index connects to retrieval — recall first, then precision</h4>
+<p>Here is the part that actually decides your answers. The index does <strong>not</strong> make retrieval smarter — Flat is the exact ceiling, the best any index can do. The index's only job is to stay <em>close</em> to that ceiling while being fast enough to use. <strong>Recall</strong> is the link: it's the fraction of the <em>true</em> nearest chunks the index returns. Recall 0.98 means that for every 100 genuinely relevant chunks, the index finds 98 and quietly misses 2.</p>
+
+<p>And "quietly" is the danger. When recall drops, the retriever hands the model a worse set of chunks — the one paragraph that answered the question didn't make the cut — so the answer turns vague or wrong, with no error logged anywhere. Your index's recall is the <strong>floor</strong> on the whole RAG system's quality: nothing downstream can rerank or reason its way back to a chunk that was never retrieved.</p>
+
+<figure>
+  <svg viewBox="0 0 640 230" role="img" aria-label="A two-stage retrieval funnel. A query enters an ANN index that narrows millions of vectors down to about 100 candidates quickly and approximately (this stage sets recall). Those candidates pass through a rescore and rerank stage that narrows 100 down to the top 5 exactly and precisely (this stage sets precision). The top 5 chunks go to the LLM, which writes the grounded answer.">
+    <defs>
+      <marker id="g30ret-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="11.5" font-weight="600" text-anchor="middle">
+      <rect x="18" y="92" width="96" height="46" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="66" y="112" fill="var(--accent-ink)">Query</text>
+      <text x="66" y="128" fill="var(--muted)" font-size="9.5">1 vector</text>
+
+      <rect x="156" y="78" width="150" height="74" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2.4"/>
+      <text x="231" y="100" fill="var(--accent-ink)">ANN index</text>
+      <text x="231" y="117" fill="var(--muted)" font-size="9.5">millions → ~100</text>
+      <text x="231" y="133" fill="var(--muted)" font-size="9.5">fast · approximate</text>
+      <text x="231" y="166" fill="var(--amber)" font-size="10" font-weight="700">sets RECALL</text>
+
+      <rect x="348" y="78" width="150" height="74" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2.4"/>
+      <text x="423" y="100" fill="var(--accent-ink)">rescore + rerank</text>
+      <text x="423" y="117" fill="var(--muted)" font-size="9.5">100 → top 5</text>
+      <text x="423" y="133" fill="var(--muted)" font-size="9.5">exact · precise</text>
+      <text x="423" y="166" fill="var(--amber)" font-size="10" font-weight="700">sets PRECISION</text>
+
+      <rect x="540" y="92" width="84" height="46" rx="10" fill="var(--amber-soft)" stroke="var(--amber)"/>
+      <text x="582" y="112" fill="var(--amber)">LLM</text>
+      <text x="582" y="128" fill="var(--muted)" font-size="9.5">answer</text>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="2.3" marker-end="url(#g30ret-ar)">
+      <path d="M114 115 L152 115"/>
+      <path d="M306 115 L344 115"/>
+      <path d="M498 115 L536 115"/>
+    </g>
+  </svg>
+  <figcaption>Two stages, two jobs. The index narrows millions to a candidate set fast (recall); rescore and rerank narrow that to the best few exactly (precision). A chunk the index drops at stage one can never be recovered at stage two.</figcaption>
+</figure>
+
+<p>Precision — getting the ordering right — is the second stage. Compressed indexes (PQ, binary) compute <em>approximate</em> distances, so the candidate list can come back in slightly the wrong order. The standard fix is a <strong>rescore</strong> (or "refine") pass: take the index's cheap candidate list, pull their <em>full-precision</em> vectors, recompute exact distances, and re-sort. Sweep wide and cheap with the index, then judge precise on the few survivors — <strong>recall from the index, precision from the rescore.</strong> A <strong>reranker</strong> (a cross-encoder) and <strong>hybrid search</strong> (keywords + vectors) sharpen precision further still; those live in the retrieval chapter. So: tune the index for recall, and let rescoring and reranking buy precision.</p>
 
 <div class="story">
   <div class="lbl">🏦 Picture this</div>
@@ -10125,6 +10185,396 @@ ranked = pc.inference.rerank(
   <div class="lbl">🧠 Remember it</div>
   <p><strong>Flat = read all. HNSW = hop the graph. IVF = shelf then search. PQ = shorthand to save space.</strong> HNSW for speed, IVF-PQ for billions.</p>
 </div>
+</section>
+
+<section class="topic">
+<h3>Indexes and retrieval quality, end to end: one query through every stage</h3>
+<p class="lede">The last topic explained each index. This one shows what they do to a real answer: one NorthBank question, followed through the index, the rescore, and the reranker, with the recall and precision measured at every step. Then every index type in pictures, and how Qdrant, Pinecone, Weaviate, Milvus, pgvector and Elasticsearch implement them.</p>
+
+<h4>First, the two numbers you will measure</h4>
+<p>Everything in this topic comes down to two questions about the chunks that come back.</p>
+<ul>
+  <li><strong>Recall@k</strong> — <em>did we find the right ones?</em> Of the true top-k (what exact Flat search returns), how many did the fast index also return? Recall 0.8 means one in five true neighbours went missing.</li>
+  <li><strong>Precision@k</strong> — <em>is what we found any good?</em> Of the k chunks we hand the model, how many actually help answer the question? Precision 0.67 at k=3 means one of the three chunks is noise the model must ignore.</li>
+</ul>
+
+<figure>
+  <svg viewBox="0 0 640 210" role="img" aria-label="Precision and recall on five chunks. Top row: what the index returned, C12, C47, C55, C03 and C19; C55 is marked wrong. Bottom row: what exact search says the true top five are, C12, C47, C03, C88 and C19; C88 is marked missed. Four of five returned are right, so precision at five is 0.8. Four of five true ones were found, so recall at five is 0.8.">
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="10.5" font-weight="600" text-anchor="middle">
+      <text x="20" y="44" fill="var(--accent-ink)" text-anchor="start" font-size="11.5">Index returned</text>
+      <text x="20" y="59" fill="var(--muted)" text-anchor="start" font-size="10" font-weight="500">(top 5)</text>
+      <rect x="130" y="28" width="48" height="36" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="154" y="50" fill="var(--accent-ink)">C12 ✓</text>
+      <rect x="186" y="28" width="48" height="36" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="210" y="50" fill="var(--accent-ink)">C47 ✓</text>
+      <rect x="242" y="28" width="48" height="36" rx="7" fill="var(--amber-soft)" stroke="var(--amber)"/><text x="266" y="50" fill="var(--amber)">C55 ✗</text>
+      <rect x="298" y="28" width="48" height="36" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="322" y="50" fill="var(--accent-ink)">C03 ✓</text>
+      <rect x="354" y="28" width="48" height="36" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="378" y="50" fill="var(--accent-ink)">C19 ✓</text>
+      <text x="420" y="44" fill="var(--accent-ink)" text-anchor="start" font-size="12" font-weight="700">precision@5 = 0.8</text>
+      <text x="420" y="60" fill="var(--muted)" text-anchor="start" font-size="10" font-weight="500">4 of 5 returned are right</text>
+
+      <text x="20" y="124" fill="var(--accent-ink)" text-anchor="start" font-size="11.5">Truly nearest</text>
+      <text x="20" y="139" fill="var(--muted)" text-anchor="start" font-size="10" font-weight="500">(Flat top 5)</text>
+      <rect x="130" y="108" width="48" height="36" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="154" y="130" fill="var(--accent-ink)">C12</text>
+      <rect x="186" y="108" width="48" height="36" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="210" y="130" fill="var(--accent-ink)">C47</text>
+      <rect x="242" y="108" width="48" height="36" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="266" y="130" fill="var(--accent-ink)">C03</text>
+      <rect x="298" y="108" width="48" height="36" rx="7" fill="var(--surface)" stroke="var(--amber)" stroke-dasharray="4 3"/><text x="322" y="130" fill="var(--amber)">C88 ?</text>
+      <rect x="354" y="108" width="48" height="36" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="378" y="130" fill="var(--accent-ink)">C19</text>
+      <text x="420" y="124" fill="var(--accent-ink)" text-anchor="start" font-size="12" font-weight="700">recall@5 = 0.8</text>
+      <text x="420" y="140" fill="var(--muted)" text-anchor="start" font-size="10" font-weight="500">found 4 of the 5 true ones</text>
+
+      <text x="320" y="188" fill="var(--muted)" font-size="10.5" font-weight="500">Recall: how much of what is right came back. Precision: how much of what came back is right.</text>
+    </g>
+  </svg>
+  <figcaption>The fast index let in a wrong chunk (C55) and dropped a right one (C88). Recall catches the drop; precision catches the noise.</figcaption>
+</figure>
+
+<p>One honest point before the example. An index <strong>cannot raise precision above Flat</strong> — Flat already returns the exact nearest vectors. What an index decides is how much recall you <em>keep</em> while going fast. Precision goes up in the stages <em>after</em> the index: rescoring puts the candidates in the right order, and reranking judges them by meaning rather than by distance.</p>
+
+<h4>One query, start to finish</h4>
+<p>A customer asks NorthBank: <em>"Can the overdraft fee be waived?"</em> The store holds 10 million policy chunks, indexed with HNSW over binary-quantized vectors (the cheapest setup). Three chunks actually answer the question: <strong>C88</strong> (the courtesy-waiver FAQ: "one waiver every 12 months on request"), <strong>C12</strong> (the waiver policy), and <strong>C03</strong> (the account terms with the waiver clause). <strong>C47</strong> (the fee schedule) only states the amount, <strong>C19</strong> is a complaint form, and <strong>C55</strong> is about ATM fees.</p>
+
+<figure>
+  <svg viewBox="0 0 640 250" role="img" aria-label="The worked retrieval pipeline with numbers. Embed the query, about 20 milliseconds. ANN index over binary vectors narrows 10 million chunks to 20 candidates in about 3 milliseconds; this sets recall. Rescore with full vectors narrows 20 to 5 in about 1 millisecond; this fixes the order. Rerank with a cross-encoder narrows 5 to 3 in about 60 milliseconds; this sets precision. The LLM writes the answer with citations.">
+    <defs>
+      <marker id="g30e2e-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="10.5" font-weight="600" text-anchor="middle">
+      <rect x="10" y="56" width="100" height="78" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="60" y="80" fill="var(--accent-ink)" font-size="11.5">1 · Embed</text>
+      <text x="60" y="98" fill="var(--muted)" font-weight="500">1,536 numbers</text>
+      <text x="60" y="122" fill="var(--muted)" font-weight="500">~20 ms</text>
+
+      <rect x="140" y="56" width="100" height="78" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2.2"/>
+      <text x="190" y="80" fill="var(--accent-ink)" font-size="11.5">2 · Index</text>
+      <text x="190" y="98" fill="var(--muted)" font-weight="500">10M → 20</text>
+      <text x="190" y="112" fill="var(--muted)" font-weight="500">binary + HNSW</text>
+      <text x="190" y="126" fill="var(--muted)" font-weight="500">~3 ms</text>
+
+      <rect x="270" y="56" width="100" height="78" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2.2"/>
+      <text x="320" y="80" fill="var(--accent-ink)" font-size="11.5">3 · Rescore</text>
+      <text x="320" y="98" fill="var(--muted)" font-weight="500">20 → 5</text>
+      <text x="320" y="112" fill="var(--muted)" font-weight="500">full vectors</text>
+      <text x="320" y="126" fill="var(--muted)" font-weight="500">~1 ms</text>
+
+      <rect x="400" y="56" width="100" height="78" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2.2"/>
+      <text x="450" y="80" fill="var(--accent-ink)" font-size="11.5">4 · Rerank</text>
+      <text x="450" y="98" fill="var(--muted)" font-weight="500">5 → 3</text>
+      <text x="450" y="112" fill="var(--muted)" font-weight="500">cross-encoder</text>
+      <text x="450" y="126" fill="var(--muted)" font-weight="500">~60 ms</text>
+
+      <rect x="530" y="56" width="100" height="78" rx="10" fill="var(--amber-soft)" stroke="var(--amber)"/>
+      <text x="580" y="80" fill="var(--amber)" font-size="11.5">5 · LLM</text>
+      <text x="580" y="98" fill="var(--muted)" font-weight="500">answer</text>
+      <text x="580" y="112" fill="var(--muted)" font-weight="500">+ citations</text>
+
+      <text x="190" y="160" fill="var(--amber)" font-weight="700">sets RECALL</text>
+      <text x="320" y="160" fill="var(--amber)" font-weight="700">fixes ORDER</text>
+      <text x="450" y="160" fill="var(--amber)" font-weight="700">sets PRECISION</text>
+      <text x="320" y="206" fill="var(--muted)" font-weight="500">≈ 85 ms of retrieval before the model writes a word</text>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="2.2" marker-end="url(#g30e2e-ar)">
+      <path d="M110 95 L136 95"/>
+      <path d="M240 95 L266 95"/>
+      <path d="M370 95 L396 95"/>
+      <path d="M500 95 L526 95"/>
+    </g>
+  </svg>
+  <figcaption>Each stage narrows the list and owns one quality: the index keeps recall, the rescore fixes the order, the reranker lifts precision.</figcaption>
+</figure>
+
+<p>Now the same query three ways, measured. Recall@5 is checked against exact Flat search. Precision@3 counts how many of the three chunks sent to the model actually answer "can it be waived."</p>
+
+<table>
+<tr><th>Setup</th><th>Chunks that come back</th><th>recall@5</th><th>precision@3</th><th>Time</th></tr>
+<tr><td>A · Binary HNSW, ask for 5, no rescore</td><td>C47, C12, C55, C03, C19</td><td>0.80 (missed C88)</td><td>0.33 (C47, C12, C55)</td><td>~3 ms</td></tr>
+<tr><td>B · Same index, fetch 20 (oversample 4×), rescore with full vectors, keep 5</td><td>C12, C47, C03, C88, C19</td><td>1.00</td><td>0.67 (C12, C47, C03)</td><td>~4 ms</td></tr>
+<tr><td>C · B + cross-encoder rerank, keep 3</td><td>C88, C12, C03</td><td>1.00</td><td>1.00</td><td>~64 ms</td></tr>
+</table>
+
+<p>Read the table row by row.</p>
+<ul>
+  <li><strong>Row A — compression hurt both numbers.</strong> Binary vectors keep only the sign of each number, so their distances are rough. The rough distances pushed C88, the best answer, just outside the top 5, and let C55 (ATM fees) sneak in. Nothing errored. The model would simply answer from weaker chunks.</li>
+  <li><strong>Row B — oversampling plus rescore restored recall.</strong> Asking the cheap index for 20 candidates instead of 5 gave the true neighbours room to be found. Recomputing exact distances on those 20, using the full float vectors, put them back in the correct order. Recall rose to 1.00 for one extra millisecond. This is why every quantized index ships with a rescore option.</li>
+  <li><strong>Row C — the reranker lifted precision.</strong> Even exact distance ranked C47 (the fee schedule) second, because it is <em>about</em> overdraft fees. But it doesn't say anything about waivers. A cross-encoder reads the question and each chunk together and scores how well the chunk <em>answers</em> it, so it moves C88 to first and drops C47. Precision@3 went from 0.67 to 1.00. Distance measures "similar topic"; the reranker measures "answers the question."</li>
+</ul>
+<div class="out"><div class="lbl">▶ Final answer, grounded on row C</div>Yes. NorthBank waives the overdraft item fee once every 12 months if you ask [C88]. The waiver is applied by request through support or the app [C12], and it is set out in section 7 of your account terms [C03].</div>
+
+<h4>Every index type, in one picture each</h4>
+<p>Index structures decide <em>where to look</em>. There are four shapes you will meet.</p>
+
+<figure>
+  <svg viewBox="0 0 640 420" role="img" aria-label="Four index structures. Flat: the query is compared with every vector. HNSW: three layers, a few long hops on the sparse top layer, then shorter hops down to the dense bottom layer where the nearest vector is. IVF: vectors grouped into four cells around centres; only the two cells nearest the query are searched. DiskANN: a small compressed copy in RAM guides reads of a large graph and full vectors stored on SSD.">
+    <defs>
+      <marker id="g30e2e-g-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--amber)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="10.5" font-weight="600" text-anchor="middle">
+      <rect x="10" y="10" width="305" height="200" rx="12" fill="var(--surface)" stroke="var(--line)"/>
+      <rect x="325" y="10" width="305" height="200" rx="12" fill="var(--surface)" stroke="var(--line)"/>
+      <rect x="10" y="220" width="305" height="190" rx="12" fill="var(--surface)" stroke="var(--line)"/>
+      <rect x="325" y="220" width="305" height="190" rx="12" fill="var(--surface)" stroke="var(--line)"/>
+
+      <text x="162" y="32" fill="var(--accent-ink)" font-size="12" font-weight="700">Flat — check every vector</text>
+      <g stroke="var(--amber)" stroke-width="1" opacity="0.4">
+        <path d="M255 110 L50 70"/><path d="M255 110 L95 70"/><path d="M255 110 L140 70"/><path d="M255 110 L185 70"/>
+        <path d="M255 110 L50 110"/><path d="M255 110 L95 110"/><path d="M255 110 L140 110"/><path d="M255 110 L185 110"/>
+        <path d="M255 110 L50 150"/><path d="M255 110 L95 150"/><path d="M255 110 L140 150"/><path d="M255 110 L185 150"/>
+      </g>
+      <g fill="var(--accent-soft)" stroke="var(--accent)">
+        <circle cx="50" cy="70" r="6"/><circle cx="95" cy="70" r="6"/><circle cx="140" cy="70" r="6"/><circle cx="185" cy="70" r="6"/>
+        <circle cx="50" cy="110" r="6"/><circle cx="95" cy="110" r="6"/><circle cx="140" cy="110" r="6"/><circle cx="185" cy="110" r="6"/>
+        <circle cx="50" cy="150" r="6"/><circle cx="95" cy="150" r="6"/><circle cx="140" cy="150" r="6"/><circle cx="185" cy="150" r="6"/>
+      </g>
+      <circle cx="255" cy="110" r="11" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="2"/>
+      <text x="255" y="114" fill="var(--amber)" font-weight="700">Q</text>
+      <text x="162" y="192" fill="var(--muted)" font-weight="500">exact · work grows with every vector</text>
+
+      <text x="477" y="32" fill="var(--accent-ink)" font-size="12" font-weight="700">HNSW — express lanes, then local</text>
+      <g stroke="var(--faint)" stroke-dasharray="3 3"><path d="M355 65 L620 65"/><path d="M355 110 L620 110"/><path d="M355 155 L620 155"/></g>
+      <text x="342" y="69" fill="var(--muted)" font-size="9.5">L2</text>
+      <text x="342" y="114" fill="var(--muted)" font-size="9.5">L1</text>
+      <text x="342" y="159" fill="var(--muted)" font-size="9.5">L0</text>
+      <g stroke="var(--accent)" stroke-width="1.2" opacity="0.55">
+        <path d="M390 65 L560 65"/><path d="M370 110 L450 110 L530 110 L600 110"/>
+        <path d="M360 155 L605 155"/>
+      </g>
+      <g fill="var(--accent-soft)" stroke="var(--accent)">
+        <circle cx="390" cy="65" r="6"/><circle cx="560" cy="65" r="6"/>
+        <circle cx="370" cy="110" r="6"/><circle cx="450" cy="110" r="6"/><circle cx="530" cy="110" r="6"/><circle cx="600" cy="110" r="6"/>
+        <circle cx="360" cy="155" r="5"/><circle cx="395" cy="155" r="5"/><circle cx="430" cy="155" r="5"/><circle cx="465" cy="155" r="5"/>
+        <circle cx="500" cy="155" r="5"/><circle cx="535" cy="155" r="5"/><circle cx="605" cy="155" r="5"/>
+      </g>
+      <circle cx="570" cy="155" r="8" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="2"/>
+      <path d="M390 65 L556 65 M560 65 L533 104 M530 110 L596 110 M600 110 L574 149" fill="none" stroke="var(--amber)" stroke-width="2.2" marker-end="url(#g30e2e-g-ar)"/>
+      <text x="477" y="192" fill="var(--muted)" font-weight="500">long hops on top, careful hops at the bottom</text>
+
+      <text x="162" y="242" fill="var(--accent-ink)" font-size="12" font-weight="700">IVF — open only the nearest cells</text>
+      <rect x="30" y="256" width="120" height="62" rx="8" fill="var(--surface)" stroke="var(--faint)" stroke-dasharray="4 3"/>
+      <rect x="160" y="256" width="120" height="62" rx="8" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="1.6"/>
+      <rect x="30" y="326" width="120" height="62" rx="8" fill="var(--surface)" stroke="var(--faint)" stroke-dasharray="4 3"/>
+      <rect x="160" y="326" width="120" height="62" rx="8" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="2.2"/>
+      <g fill="var(--muted)" font-size="13"><text x="90" y="292">×</text><text x="220" y="292">×</text><text x="90" y="362">×</text><text x="220" y="362">×</text></g>
+      <g fill="var(--surface)" stroke="var(--faint)"><circle cx="55" cy="275" r="4"/><circle cx="120" cy="300" r="4"/><circle cx="60" cy="370" r="4"/><circle cx="125" cy="345" r="4"/></g>
+      <g fill="var(--accent-soft)" stroke="var(--accent)"><circle cx="185" cy="275" r="4"/><circle cx="255" cy="302" r="4"/><circle cx="190" cy="372" r="4"/><circle cx="250" cy="340" r="4"/></g>
+      <circle cx="235" cy="365" r="8" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="2"/>
+      <text x="235" y="369" fill="var(--amber)" font-size="9" font-weight="700">Q</text>
+      <text x="162" y="404" fill="var(--muted)" font-weight="500">nprobe = 2: two cells searched, two skipped</text>
+
+      <text x="477" y="242" fill="var(--accent-ink)" font-size="12" font-weight="700">DiskANN — the graph lives on SSD</text>
+      <rect x="345" y="262" width="110" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="400" y="284" fill="var(--accent-ink)">RAM</text>
+      <text x="400" y="300" fill="var(--muted)" font-weight="500">compressed codes</text>
+      <text x="400" y="314" fill="var(--muted)" font-weight="500">small</text>
+      <rect x="482" y="262" width="135" height="110" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-dasharray="5 4"/>
+      <text x="549" y="288" fill="var(--accent-ink)">SSD</text>
+      <text x="549" y="306" fill="var(--muted)" font-weight="500">full vectors</text>
+      <text x="549" y="322" fill="var(--muted)" font-weight="500">+ graph links</text>
+      <text x="549" y="342" fill="var(--muted)" font-weight="500">large, cheap</text>
+      <path d="M455 294 L478 294" fill="none" stroke="var(--amber)" stroke-width="2.2" marker-end="url(#g30e2e-g-ar)"/>
+      <text x="477" y="404" fill="var(--muted)" font-weight="500">billions per machine · a few SSD reads per query</text>
+    </g>
+  </svg>
+  <figcaption>Flat looks everywhere. HNSW navigates a layered graph. IVF opens only nearby cells. DiskANN keeps the graph on SSD and only a compressed guide in RAM.</figcaption>
+</figure>
+
+<p><strong>Compression</strong> is the second axis. It decides <em>how much each vector weighs</em>, and it stacks on top of any structure above (an "HNSW + binary" index is HNSW for where to look, binary for how small each vector is).</p>
+
+<figure>
+  <svg viewBox="0 0 640 290" role="img" aria-label="The same eight numbers stored four ways. Float32 originals: 0.12, -0.48, 0.91, 0.05, -0.33, 0.27, -0.76, 0.64, 32 bytes. Scalar quantization int8: 15, -61, 116, 6, -42, 34, -97, 81, 8 bytes, four times smaller. Product quantization: four pairs, each replaced by one codebook code, 4 bytes, eight times smaller here. Binary quantization: 1 0 1 1 0 1 0 1, one bit each, 1 byte, thirty-two times smaller.">
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="10" font-weight="600" text-anchor="middle">
+      <text x="20" y="52" fill="var(--accent-ink)" text-anchor="start" font-size="11.5">float32</text>
+      <g fill="var(--accent-soft)" stroke="var(--accent)">
+        <rect x="130" y="30" width="42" height="34"/><rect x="172" y="30" width="42" height="34"/><rect x="214" y="30" width="42" height="34"/><rect x="256" y="30" width="42" height="34"/>
+        <rect x="298" y="30" width="42" height="34"/><rect x="340" y="30" width="42" height="34"/><rect x="382" y="30" width="42" height="34"/><rect x="424" y="30" width="42" height="34"/>
+      </g>
+      <g fill="var(--accent-ink)"><text x="151" y="51">0.12</text><text x="193" y="51">-0.48</text><text x="235" y="51">0.91</text><text x="277" y="51">0.05</text><text x="319" y="51">-0.33</text><text x="361" y="51">0.27</text><text x="403" y="51">-0.76</text><text x="445" y="51">0.64</text></g>
+      <text x="482" y="45" fill="var(--accent-ink)" text-anchor="start" font-size="11" font-weight="700">32 bytes</text>
+      <text x="482" y="59" fill="var(--muted)" text-anchor="start" font-size="9.5" font-weight="500">the original (768-dim ≈ 3 KB)</text>
+
+      <text x="20" y="112" fill="var(--accent-ink)" text-anchor="start" font-size="11.5">Scalar (int8)</text>
+      <g fill="var(--accent-soft)" stroke="var(--accent)">
+        <rect x="130" y="90" width="42" height="34"/><rect x="172" y="90" width="42" height="34"/><rect x="214" y="90" width="42" height="34"/><rect x="256" y="90" width="42" height="34"/>
+        <rect x="298" y="90" width="42" height="34"/><rect x="340" y="90" width="42" height="34"/><rect x="382" y="90" width="42" height="34"/><rect x="424" y="90" width="42" height="34"/>
+      </g>
+      <g fill="var(--accent-ink)"><text x="151" y="111">15</text><text x="193" y="111">-61</text><text x="235" y="111">116</text><text x="277" y="111">6</text><text x="319" y="111">-42</text><text x="361" y="111">34</text><text x="403" y="111">-97</text><text x="445" y="111">81</text></g>
+      <text x="482" y="105" fill="var(--accent-ink)" text-anchor="start" font-size="11" font-weight="700">8 bytes</text>
+      <text x="482" y="119" fill="var(--muted)" text-anchor="start" font-size="9.5" font-weight="500">4× smaller · tiny recall loss</text>
+
+      <text x="20" y="172" fill="var(--accent-ink)" text-anchor="start" font-size="11.5">Product (PQ)</text>
+      <g fill="var(--amber-soft)" stroke="var(--amber)">
+        <rect x="130" y="150" width="84" height="34"/><rect x="214" y="150" width="84" height="34"/><rect x="298" y="150" width="84" height="34"/><rect x="382" y="150" width="84" height="34"/>
+      </g>
+      <g fill="var(--amber)"><text x="172" y="171">code 17</text><text x="256" y="171">code 3</text><text x="340" y="171">code 42</text><text x="424" y="171">code 9</text></g>
+      <text x="482" y="165" fill="var(--accent-ink)" text-anchor="start" font-size="11" font-weight="700">4 bytes</text>
+      <text x="482" y="179" fill="var(--muted)" text-anchor="start" font-size="9.5" font-weight="500">8× here · 3 KB → 30–60 B real</text>
+
+      <text x="20" y="232" fill="var(--accent-ink)" text-anchor="start" font-size="11.5">Binary (BQ)</text>
+      <g fill="var(--surface)" stroke="var(--accent)">
+        <rect x="130" y="210" width="42" height="34"/><rect x="172" y="210" width="42" height="34"/><rect x="214" y="210" width="42" height="34"/><rect x="256" y="210" width="42" height="34"/>
+        <rect x="298" y="210" width="42" height="34"/><rect x="340" y="210" width="42" height="34"/><rect x="382" y="210" width="42" height="34"/><rect x="424" y="210" width="42" height="34"/>
+      </g>
+      <g fill="var(--accent-ink)" font-size="12"><text x="151" y="232">1</text><text x="193" y="232">0</text><text x="235" y="232">1</text><text x="277" y="232">1</text><text x="319" y="232">0</text><text x="361" y="232">1</text><text x="403" y="232">0</text><text x="445" y="232">1</text></g>
+      <text x="482" y="225" fill="var(--accent-ink)" text-anchor="start" font-size="11" font-weight="700">1 byte</text>
+      <text x="482" y="239" fill="var(--muted)" text-anchor="start" font-size="9.5" font-weight="500">32× smaller · must rescore</text>
+
+      <text x="320" y="276" fill="var(--muted)" font-size="10.5" font-weight="500">Same eight numbers, four sizes. Smaller is faster and cheaper, but its distances are estimates.</text>
+    </g>
+  </svg>
+  <figcaption>Scalar rounds each number to a small integer. PQ replaces chunks of the vector with codebook IDs. Binary keeps only each number's sign (positive → 1). The smaller the row, the more a rescore matters.</figcaption>
+</figure>
+
+<p>Put both axes together and you get the complete catalogue. Every name you will see in a database's docs is one row of this table.</p>
+
+<table>
+<tr><th>Index</th><th>Where it looks</th><th>Vector size</th><th>Recall (before rescore)</th><th>Use it when</th></tr>
+<tr><td><strong>Flat</strong></td><td>Everywhere</td><td>Full</td><td>Exact (1.00)</td><td>Under ~100K vectors, or as the ground truth for testing</td></tr>
+<tr><td><strong>IVF-Flat</strong></td><td>Nearest cells</td><td>Full</td><td>High, set by <code>nprobe</code></td><td>Large, mostly static data; less RAM than HNSW</td></tr>
+<tr><td><strong>IVF-SQ8</strong></td><td>Nearest cells</td><td>int8 (4× smaller)</td><td>Slightly below IVF-Flat</td><td>IVF, but RAM is tight</td></tr>
+<tr><td><strong>IVF-PQ / OPQ</strong></td><td>Nearest cells</td><td>Codes (10–50× smaller)</td><td>Noticeably lower; rescore</td><td>Hundreds of millions to billions on a budget</td></tr>
+<tr><td><strong>HNSW</strong></td><td>Layered graph</td><td>Full</td><td>Very high, set by <code>efSearch</code></td><td>The default for interactive search</td></tr>
+<tr><td><strong>HNSW + SQ / PQ / BQ</strong></td><td>Layered graph</td><td>int8, codes, or bits</td><td>SQ ≈ HNSW; BQ needs rescore</td><td>HNSW speed with far less RAM</td></tr>
+<tr><td><strong>DiskANN (Vamana)</strong></td><td>Graph on SSD</td><td>Codes in RAM, full on disk</td><td>High</td><td>Billions on one machine; RAM is the wall</td></tr>
+<tr><td><strong>ScaNN</strong></td><td>Partitions + smart quantization</td><td>Codes</td><td>High for its size</td><td>Big inner-product workloads</td></tr>
+<tr><td><strong>GPU (CAGRA)</strong></td><td>Graph built for GPUs</td><td>Full</td><td>High</td><td>Very high query throughput, batch search</td></tr>
+<tr><td><strong>Annoy / LSH</strong></td><td>Random trees / hash buckets</td><td>Full</td><td>Lower per byte</td><td>Legacy systems; rarely the best choice today</td></tr>
+</table>
+
+<h4>How the real databases do it</h4>
+<p>Every vector database is built from the same parts. What differs is <em>how many of them you get to choose</em>. Some hand you every knob; some hide the index completely.</p>
+
+<table>
+<tr><th>Database</th><th>Index you choose</th><th>Recall knob</th><th>Compression</th><th>Rescore</th></tr>
+<tr><td><strong>Qdrant</strong></td><td>HNSW (falls back to a full scan for small or heavily filtered sets)</td><td><code>m</code>, <code>ef_construct</code>; <code>hnsw_ef</code> per query</td><td>Scalar, product, binary (1, 1.5, 2-bit)</td><td><code>rescore</code> + <code>oversampling</code></td></tr>
+<tr><td><strong>Pinecone</strong> (serverless)</td><td>None — picks per storage slab automatically</td><td>None exposed; you set <code>top_k</code></td><td>Internal (RaBitQ, PQ-based)</td><td>Built in; add a hosted reranker</td></tr>
+<tr><td><strong>Weaviate</strong></td><td><code>flat</code>, <code>hnsw</code>, <code>dynamic</code> (flat → HNSW at 10K objects), <code>hfresh</code></td><td><code>ef</code>, <code>maxConnections</code></td><td>RQ (recommended), PQ, SQ, BQ</td><td><code>rescoreLimit</code></td></tr>
+<tr><td><strong>Milvus</strong></td><td>FLAT, IVF_FLAT, IVF_SQ8, IVF_PQ, HNSW (+SQ/PQ/PRQ), IVF_RABITQ, DISKANN, SCANN, GPU_CAGRA, AUTOINDEX</td><td><code>nprobe</code>; <code>M</code>, <code>ef</code></td><td>SQ8, PQ, RaBitQ</td><td>Refine options per index</td></tr>
+<tr><td><strong>pgvector</strong></td><td><code>hnsw</code>, <code>ivfflat</code></td><td><code>hnsw.ef_search</code>; <code>ivfflat.probes</code></td><td><code>halfvec</code> (half size), <code>binary_quantize</code></td><td>In SQL: a subquery, then re-sort</td></tr>
+<tr><td><strong>Elasticsearch</strong></td><td><code>hnsw</code>, <code>int8_hnsw</code>, <code>int4_hnsw</code>, <code>bbq_hnsw</code>, <code>bbq_disk</code>, flat variants</td><td><code>num_candidates</code>; <code>m</code>, <code>ef_construction</code></td><td>int8, int4, BBQ (binary)</td><td><code>rescore_vector</code> with <code>oversample</code></td></tr>
+</table>
+
+<p><strong>Qdrant</strong> is the clearest place to see every stage of the worked example, because it exposes each one by name. You set the graph and the compression when you create the collection, then turn on oversampling and rescore at query time. That is setup B from the table above, in code.</p>
+<pre><code>from qdrant_client import QdrantClient, models
+
+client = QdrantClient(url="http://localhost:6333")
+
+client.create_collection(
+    collection_name="policies",
+    vectors_config=models.VectorParams(size=1536, distance=models.Distance.COSINE),
+    hnsw_config=models.HnswConfigDiff(m=16, ef_construct=200),   <span class="cmt"># WHERE to look: the HNSW graph</span>
+    quantization_config=models.BinaryQuantization(                 <span class="cmt"># HOW small: 1 bit per number</span>
+        binary=models.BinaryQuantizationConfig(always_ram=True)),  <span class="cmt"># small copy in RAM, originals on disk</span>
+)
+
+hits = client.query_points(
+    collection_name="policies",
+    query=query_vector,                                            <span class="cmt"># the embedded question</span>
+    limit=5,                                                       <span class="cmt"># we want 5 back</span>
+    search_params=models.SearchParams(
+        hnsw_ef=128,                                               <span class="cmt"># wider graph search = higher recall</span>
+        quantization=models.QuantizationSearchParams(
+            rescore=True,                                          <span class="cmt"># re-check with full vectors (fixes order)</span>
+            oversampling=4.0)),                                    <span class="cmt"># fetch 4 × 5 = 20 candidates first (fixes recall)</span>
+)</code></pre>
+<p>Qdrant's own measurements show why the last two lines matter: 1-bit quantization <em>without</em> rescoring recalls only about 0.6 of what exact search finds. With oversampling and rescore, it recovers most of the rest for little extra time.</p>
+
+<p><strong>Pinecone</strong> takes the opposite approach. Serverless Pinecone has <em>no index type to choose</em>. It stores your vectors in immutable "slabs" and picks the algorithm per slab by size (a quantized scan for small slabs, IVF with compressed codes for large ones). You get no recall knob, so your levers are <code>top_k</code> and a reranker on top.</p>
+<pre><code>from pinecone import Pinecone, ServerlessSpec
+
+pc = Pinecone()                                       <span class="cmt"># reads PINECONE_API_KEY</span>
+pc.create_index(name="policies", dimension=1536, metric="cosine",
+    spec=ServerlessSpec(cloud="aws", region="us-east-1"))   <span class="cmt"># note: no index type to pick</span>
+
+index = pc.Index("policies")
+res = index.query(vector=query_vector, top_k=20,     <span class="cmt"># over-fetch so the reranker has room</span>
+                  include_metadata=True)
+
+reranked = pc.inference.rerank(                       <span class="cmt"># hosted cross-encoder = the precision stage</span>
+    model="bge-reranker-v2-m3",
+    query="Can the overdraft fee be waived?",
+    documents=[m.metadata["text"] for m in res.matches],
+    top_n=3)                                          <span class="cmt"># keep the 3 that best answer the question</span></code></pre>
+
+<p><strong>pgvector</strong> closes the loop with the SQL index you already know. An HNSW index is created with ordinary <code>CREATE INDEX</code>, and the "fetch wide, then re-check" pattern is plain SQL: a subquery over the small binary copy, then an exact re-sort.</p>
+<pre><code><span class="cmt">-- an HNSW index, created like any SQL index</span>
+CREATE INDEX ON chunks USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+SET hnsw.ef_search = 100;                    <span class="cmt">-- the live recall dial, per session</span>
+
+<span class="cmt">-- binary quantization + rescore, in pure SQL</span>
+CREATE INDEX ON chunks USING hnsw
+  ((binary_quantize(embedding)::bit(1536)) bit_hamming_ops);
+
+SELECT id FROM (
+  SELECT id, embedding FROM chunks           <span class="cmt">-- stage 2: cheap search on 1-bit copies</span>
+  ORDER BY binary_quantize(embedding)::bit(1536) &lt;~&gt; binary_quantize(:q)
+  LIMIT 20                                   <span class="cmt">-- over-fetch 20</span>
+) AS candidates
+ORDER BY embedding &lt;=&gt; :q                     <span class="cmt">-- stage 3: exact re-sort on full vectors</span>
+LIMIT 5;</code></pre>
+
+<p><strong>Milvus</strong> gives you the whole catalogue and asks you to name one. <code>AUTOINDEX</code> picks for you; otherwise you pass the type and its knobs:</p>
+<pre><code>index_params = client.prepare_index_params()
+index_params.add_index(
+    field_name="embedding",
+    index_type="HNSW",                       <span class="cmt"># or IVF_FLAT, IVF_PQ, DISKANN, GPU_CAGRA, AUTOINDEX ...</span>
+    metric_type="COSINE",
+    params={"M": 16, "efConstruction": 200})
+client.create_index(collection_name="policies", index_params=index_params)</code></pre>
+
+<p><strong>Elasticsearch</strong> sets the index in the field mapping. Recent versions default dense vectors of 384+ dimensions to a binary-quantized HNSW (<code>bbq_hnsw</code>), and a <code>rescore_vector</code> block on the query does the oversample-and-rescore step:</p>
+<pre><code>{ "mappings": { "properties": {
+    "embedding": { "type": "dense_vector", "dims": 1536, "similarity": "cosine",
+                   "index_options": { "type": "bbq_hnsw" } } } } }
+
+{ "knn": { "field": "embedding", "query_vector": [...], "k": 5, "num_candidates": 100,
+           "rescore_vector": { "oversample": 4.0 } } }</code></pre>
+
+<p><strong>Weaviate</strong> sits in the middle. You pick <code>flat</code> (small data, exact), <code>hnsw</code> (large data), or <code>dynamic</code>, which starts flat and switches itself to HNSW once a tenant passes 10,000 objects — handy when each customer's data starts tiny. For compression it recommends rotational quantization (RQ), with <code>rescoreLimit</code> controlling how many candidates get the full-precision re-check.</p>
+
+<h4>Measure it on your own data</h4>
+<p>Every number above is an example. Yours depend on your vectors, so measure: build a Flat index as ground truth, build the fast index, and compare their top-k for a few hundred real queries.</p>
+<pre><code>import faiss, numpy as np
+
+d = 768
+xb = load_chunk_vectors()                    <span class="cmt"># your real chunk embeddings, float32</span>
+xq = load_sample_query_vectors()             <span class="cmt"># a few hundred real user questions</span>
+
+flat = faiss.IndexFlatIP(d); flat.add(xb)    <span class="cmt"># ground truth: exact search</span>
+_, truth = flat.search(xq, 10)
+
+hnsw = faiss.IndexHNSWFlat(d, 32, faiss.METRIC_INNER_PRODUCT); hnsw.add(xb)
+for ef in (16, 64, 256):                     <span class="cmt"># sweep the live recall dial</span>
+    hnsw.hnsw.efSearch = ef
+    _, got = hnsw.search(xq, 10)
+    recall = np.mean([len(set(g) &amp; set(t)) / 10 for g, t in zip(got, truth)])
+    print(f"efSearch={ef:&gt;3}  recall@10={recall:.3f}")</code></pre>
+<div class="out"><div class="lbl">▶ Output (illustrative — yours will differ)</div>efSearch= 16  recall@10=0.861<br>efSearch= 64  recall@10=0.968<br>efSearch=256  recall@10=0.994</div>
+<p>Pick the smallest setting that clears your target (say recall@10 ≥ 0.95), then check latency at that setting. For precision, label 50–100 real questions with the chunks that truly answer them and compute precision@k before and after adding a reranker. That one table tells you whether the reranker is worth its 60 ms.</p>
+
+<div class="card">
+  <div class="lbl">⚙️ In production</div>
+  <p><strong>Set the stages, not just the index.</strong> The cheap, reliable recipe for most banks: a compressed index (HNSW + scalar or binary), oversample 3–4×, rescore with full vectors, then rerank to the top 3–5. You get most of the RAM savings of compression with almost none of the quality loss.</p>
+  <p><strong>Watch recall over time.</strong> Recall falls quietly as data grows, as IVF centres go stale, or as filters get stricter. Keep a fixed set of test queries with Flat ground truth and re-run the recall check on a schedule. Alert when recall@10 drops below your bar, the same way you alert on latency.</p>
+  <p><strong>Match the database to how much control you need.</strong> Need every knob and audit-grade tuning? Qdrant, Milvus or pgvector. Want zero index operations? Pinecone, accepting that recall is managed for you and your quality levers are <code>top_k</code> and reranking.</p>
+</div>
+
+<div class="warn">
+  <div class="lbl">⚠ Watch out</div>
+  <p>Don't turn on binary or product quantization without rescoring — it is the most common silent quality loss in RAG. Don't expect a faster index to <em>improve</em> answers; at best it matches Flat. And don't confuse the two "recalls": <em>index</em> recall compares the fast index with exact search, while <em>retrieval</em> recall compares results with what a human marks as relevant. You need both, and they are measured differently.</p>
+</div>
+
+<div class="qa">
+  <div class="q">Q. Your RAG answers got worse after you switched the vector index to binary quantization to save RAM. What happened, and how do you fix it without giving the RAM back?</div>
+  <div class="a">A. Binary quantization keeps only the sign of each number, so its distances are rough. The best chunks slipped just outside the top-k (recall fell) and weaker ones got in (precision fell), with no error anywhere. The fix keeps the small index and adds two stages: <strong>oversample</strong> (fetch 3–4× more candidates than you need) so the true neighbours are in the pool, then <strong>rescore</strong> those candidates with the full-precision vectors to restore the correct order. Qdrant's measurements show 1-bit search alone recalls about 0.6 of exact search; oversampling plus rescore recovers most of the gap. <strong>Strong answer adds:</strong> the index can only preserve recall, never beat Flat; precision comes from the reranker, which scores whether a chunk <em>answers</em> the question rather than whether it is <em>near</em> it; and you prove each step with recall@k against a Flat ground truth and precision@k against labelled questions.</div>
+</div>
+
+<div class="remember">
+  <div class="lbl">🧠 Remember it</div>
+  <p><strong>Index keeps recall. Rescore fixes order. Rerank lifts precision.</strong> Structure decides where to look; compression decides how small. Always rescore what you compress.</p>
+</div>
+<p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
 
 <section class="topic">
@@ -13303,7 +13753,7 @@ def answer_with_memory(question, user_id, audience, doc_store, memory_store, llm
 <li><strong>Retrieval bad, generation good</strong> — the most dangerous box, because it <em>looks</em> fine. The writer faithfully, fluently, confidently wrote an answer grounded in the <em>wrong</em> pages. A faithfulness score alone would wave this through. Only the retrieval score exposes it. Owner: the search team.</li>
 <li><strong>Retrieval bad, generation bad</strong> — everything is broken; start with retrieval, because fixing the writer is pointless while the desk holds the wrong pages.</li>
 </ul>
-<p>The quadrant you're in is not visible from the final answer. Two customers can get the same wrong "$15 fee" reply — one because retrieval fetched a stale page (box three), one because the model ignored a correct page (box two). Same symptom, opposite cure. That is the entire argument for two scores in one sentence: the symptom is shared, the cure is not.</p>
+<p>The quadrant you're in is not visible from the final answer. Two customers can get the same wrong "$15 fee" reply — one because retrieval fetched a stale page (box three), one because the model ignored a correct page (box two). Same symptom, opposite cure. That is the entire argument for two scores in one sentence: the symptom is shared, the cure is not. The next topic lists every specific way each machine fails, and the fix for each.</p>
 
 <p><strong>How the split works in practice.</strong> You attach the two scores to every logged answer. Retrieval is graded against a ground-truth list of which chunks should have been fetched (an offline measurement, because it needs labels). Generation is graded by asking a second model — a judge — whether each claim in the answer is supported by the chunks that <em>were</em> fetched (this needs no labels, so it can run on live traffic too). The pair travels together through your dashboards, so a human or an alert can read the quadrant at a glance instead of re-deriving it from a transcript.</p>
 
@@ -13333,6 +13783,162 @@ def answer_with_memory(question, user_id, audience, doc_store, memory_store, llm
   <div class="lbl">🧠 Remember it</div>
   <p><strong>Librarian or writer?</strong> Grade them apart, read retrieval first. You can't fix a two-part machine with a one-part score.</p>
 </div>
+</section>
+
+<section class="topic">
+<h3>Fixing a wrong answer: every failure type and its remedy</h3>
+<p class="lede">"Retrieval failed" or "generation failed" tells you which machine broke. To fix it you need the exact failure. This topic lists every common one, shows how to find which one you have by tracing a single chunk, and gives the production fix for each.</p>
+
+<p>Research on real RAG systems keeps finding the same short list. Barnett et al.'s "Seven Failure Points" (2024) named the classic ones: missing content, missed the top-ranked documents, not in context, not extracted, wrong format, incorrect specificity, and incomplete. Later taxonomies (Leung et al., EACL 2026; Garani, TrustNLP 2026, which counts 33 modes across 7 stages) split the pipeline more finely, but they agree on the main point. Failures happen at a <strong>stage</strong>, and the fix belongs to that stage. So there are really four places an answer can go wrong, not two: the knowledge base, the search, the step that builds the prompt, and the writer.</p>
+
+<h4>Find the stage: trace the right chunk</h4>
+<p>Take one wrong answer and the chunk that <em>should</em> have answered it (the "gold" chunk). Follow that chunk through the pipeline and ask four yes/no questions in order. The first "no" is your failure stage.</p>
+
+<figure>
+  <svg viewBox="0 0 640 330" role="img" aria-label="A diagnosis flow for a wrong RAG answer. Question one: is the answer anywhere in the knowledge base? If no, it is a missing or stale content failure. Question two: did search fetch it into the top k? If no, it is a retrieval failure. Question three: did it survive into the prompt? If no, it is a context assembly failure. Question four: is the answer faithful, complete and well formed? If no, it is a generation failure. If all four are yes, check whether the eval label or the question itself was wrong.">
+    <defs>
+      <marker id="g40fix-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="11.5" font-weight="600" text-anchor="middle">
+      <rect x="20" y="10" width="360" height="34" rx="9" fill="var(--amber-soft)" stroke="var(--amber)"/>
+      <text x="200" y="32" fill="var(--amber)">A customer got a wrong answer</text>
+
+      <rect x="20" y="62" width="360" height="38" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="200" y="86" fill="var(--accent-ink)">1 · Is the answer anywhere in the knowledge base?</text>
+      <rect x="420" y="62" width="210" height="38" rx="9" fill="var(--surface)" stroke="var(--amber)"/>
+      <text x="525" y="78" fill="var(--amber)">Missing or stale content</text>
+      <text x="525" y="93" fill="var(--muted)" font-size="9.5" font-weight="500">fix ingestion, or refuse</text>
+
+      <rect x="20" y="118" width="360" height="38" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="200" y="142" fill="var(--accent-ink)">2 · Did search fetch it into the top-k?</text>
+      <rect x="420" y="118" width="210" height="38" rx="9" fill="var(--surface)" stroke="var(--amber)"/>
+      <text x="525" y="134" fill="var(--amber)">Retrieval failure</text>
+      <text x="525" y="149" fill="var(--muted)" font-size="9.5" font-weight="500">query, chunking, hybrid, rerank</text>
+
+      <rect x="20" y="174" width="360" height="38" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="200" y="198" fill="var(--accent-ink)">3 · Did it survive into the prompt?</text>
+      <rect x="420" y="174" width="210" height="38" rx="9" fill="var(--surface)" stroke="var(--amber)"/>
+      <text x="525" y="190" fill="var(--amber)">Context-assembly failure</text>
+      <text x="525" y="205" fill="var(--muted)" font-size="9.5" font-weight="500">token budget, order, truncation</text>
+
+      <rect x="20" y="230" width="360" height="38" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="200" y="254" fill="var(--accent-ink)">4 · Is the answer faithful, complete, well formed?</text>
+      <rect x="420" y="230" width="210" height="38" rx="9" fill="var(--surface)" stroke="var(--amber)"/>
+      <text x="525" y="246" fill="var(--amber)">Generation failure</text>
+      <text x="525" y="261" fill="var(--muted)" font-size="9.5" font-weight="500">prompt, model, guards</text>
+
+      <rect x="20" y="286" width="360" height="34" rx="9" fill="var(--surface)" stroke="var(--accent)" stroke-dasharray="5 4"/>
+      <text x="200" y="308" fill="var(--muted)">All yes → check the eval label or the question</text>
+
+      <g fill="var(--muted)" font-size="9.5" font-weight="500">
+        <text x="214" y="57">yes</text><text x="214" y="113">yes</text><text x="214" y="169">yes</text><text x="214" y="225">yes</text><text x="214" y="281">yes</text>
+        <text x="399" y="76">no</text><text x="399" y="132">no</text><text x="399" y="188">no</text><text x="399" y="244">no</text>
+      </g>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#g40fix-ar)">
+      <path d="M200 44 L200 59"/><path d="M200 100 L200 115"/><path d="M200 156 L200 171"/><path d="M200 212 L200 227"/><path d="M200 268 L200 283"/>
+      <path d="M380 81 L416 81"/><path d="M380 137 L416 137"/><path d="M380 193 L416 193"/><path d="M380 249 L416 249"/>
+    </g>
+  </svg>
+  <figcaption>Four questions, asked in order. The first "no" names the stage that broke, and therefore which team and which fix.</figcaption>
+</figure>
+
+<h4>One tiny worked example</h4>
+<p>A customer asks: <em>"What's the fee for an international transfer?"</em> NorthBank answers "$25." The real fee is $45. The gold chunk is <code>C-WIRE-07</code>: "Foreign (SWIFT) wire, outgoing: $45." Your logs recorded every stage, so you trace that chunk.</p>
+<table>
+<tr><th>Stage</th><th>Question</th><th>What the log shows</th><th>Verdict</th></tr>
+<tr><td>Knowledge base</td><td>Is C-WIRE-07 indexed?</td><td>Yes, ingested 2 March, current version</td><td>✓ yes</td></tr>
+<tr><td>Retrieval</td><td>Is it in the top 5?</td><td>No, ranked <strong>#14</strong>. Top 5 were the <em>domestic</em> wire fee ($25), cut-off times, and three FAQ pages</td><td>✗ <strong>failure here</strong></td></tr>
+<tr><td>Prompt</td><td>—</td><td>Never reached</td><td>—</td></tr>
+<tr><td>Generation</td><td>—</td><td>Faithful to the wrong chunk: it quoted the $25 domestic fee correctly</td><td>(not the cause)</td></tr>
+</table>
+<p>The diagnosis is <strong>retrieval: vocabulary mismatch</strong>. The customer said "international transfer"; the document says "foreign (SWIFT) wire." Embedding similarity pulled the near-synonym "wire" pages but ranked the domestic one higher. The fix lives in search, not in the prompt: add <strong>hybrid search</strong> (keyword BM25 catches "transfer"/"wire" and the SWIFT term via a synonym list), fetch 30 candidates, then <strong>rerank</strong>. After the fix, C-WIRE-07 comes back at rank 2, survives into the prompt, and the answer becomes "$45 [C-WIRE-07]." A bigger model would have changed nothing. It was faithfully quoting the only fee it was shown.</p>
+
+<p>The trace is easy to automate once every stage logs its chunk IDs:</p>
+<pre><code>def triage(log, gold_ids):
+    """Name the stage that failed, given one logged answer and the chunks that should have answered it."""
+    if not any(g in log["kb_ids"] for g in gold_ids):
+        return "missing content"                     <span class="cmt"># the answer isn't in the knowledge base at all</span>
+    if not any(g in log["retrieved_ids"] for g in gold_ids):
+        return "retrieval: not in top-k"             <span class="cmt"># indexed, but search didn't fetch it</span>
+    if not any(g in log["context_ids"] for g in gold_ids):
+        return "context assembly: dropped"           <span class="cmt"># fetched, then cut by rerank or the token budget</span>
+    if not log["judge"]["faithful"]:
+        return "generation: unfaithful"              <span class="cmt"># added claims the context doesn't support</span>
+    if not log["judge"]["complete"]:
+        return "generation: not extracted / incomplete"  <span class="cmt"># context had it, answer missed it</span>
+    return "ok"                                      <span class="cmt"># all four passed: check the label itself</span>
+
+print(triage(wire_fee_log, gold_ids={"C-WIRE-07"}))</code></pre>
+<div class="out"><div class="lbl">▶ Output</div>retrieval: not in top-k</div>
+
+<h4>Every failure type and its fix</h4>
+<p>Once you know the stage, pick the exact failure from its table. Each row is something a real system does wrong, what it looks like, and the production fix.</p>
+
+<p><strong>Stage 1 and 2 — the knowledge base and the search (the librarian)</strong></p>
+<table>
+<tr><th>Failure</th><th>What you see</th><th>Fix</th></tr>
+<tr><td><strong>Missing content</strong></td><td>The answer exists nowhere in the indexed documents; the model guesses or answers from memory</td><td>Track "no good chunk" queries as a content-gap report; add the source; instruct the model to say "I don't have that" and offer a human when retrieval scores are low</td></tr>
+<tr><td><strong>Stale or conflicting content</strong></td><td>Old and new versions both indexed; the model quotes last year's rate</td><td>Version and date every chunk; delete or tombstone superseded docs on re-ingest; filter or boost by effective date; rank authoritative sources above marketing pages</td></tr>
+<tr><td><strong>Bad parsing</strong></td><td>Tables come out as word soup; numbers detach from their labels</td><td>Layout-aware parsing (tables to markdown), a parse-quality gate before indexing, spot checks on the worst documents</td></tr>
+<tr><td><strong>Bad chunking</strong></td><td>The rule is in one chunk, its exception in the next; a chunk lacks the heading that gives it meaning</td><td>Structure-aware chunking on headings, overlap, parent-child retrieval (match a small chunk, return its parent section), contextual headers prepended to each chunk</td></tr>
+<tr><td><strong>Vocabulary mismatch</strong></td><td>Customer words differ from document words: "international transfer" vs "SWIFT wire," product codes, acronyms</td><td>Hybrid search (BM25 + vectors), synonym and acronym lists, query expansion, a domain-tuned embedding model</td></tr>
+<tr><td><strong>Vague, ambiguous, or multi-part query</strong></td><td>"What about the fee?" after five turns; "fees and limits for joint accounts"</td><td>Query rewriting with chat history, decomposition into sub-questions, multi-query retrieval, HyDE, or a clarifying question when the intent is truly unclear</td></tr>
+<tr><td><strong>Right document ranked too low</strong></td><td>The gold chunk is at rank 12 with top-k = 5</td><td>Fetch 20–50 candidates and rerank with a cross-encoder; check index recall (raise <code>efSearch</code>/<code>nprobe</code>, rescore if compressed)</td></tr>
+<tr><td><strong>Filter or permission over-restriction</strong></td><td>A metadata or ACL filter silently drops the only matching chunk</td><td>Filter-aware ANN search; test recall <em>with</em> filters; log filtered-out counts; verify the user's entitlements are correct</td></tr>
+<tr><td><strong>Near-duplicate crowding</strong></td><td>Five copies of one FAQ fill the top-k; the second relevant source never appears</td><td>Deduplicate at ingestion; MMR (maximal marginal relevance) to diversify the top-k</td></tr>
+<tr><td><strong>Multi-hop question</strong></td><td>The answer needs two documents that don't mention each other ("fee for my account type")</td><td>Iterative or agentic retrieval (look up the account type, then the fee), or a knowledge graph linking entities</td></tr>
+<tr><td><strong>Embedding or index drift</strong></td><td>Quality drops after a model swap or partial re-index; old and new vectors mixed</td><td>Same embedding model for queries and documents; versioned indexes with a full re-embed and blue-green switch; nightly recall regression on a golden set</td></tr>
+</table>
+
+<p><strong>Stage 3 — building the prompt (between librarian and writer)</strong></p>
+<table>
+<tr><th>Failure</th><th>What you see</th><th>Fix</th></tr>
+<tr><td><strong>Not in context (truncated)</strong></td><td>Retrieved, then cut because the prompt hit its token budget</td><td>Plan the budget per section; rerank <em>before</em> truncating so the best survive; compress or summarise long chunks; fewer, better chunks</td></tr>
+<tr><td><strong>Lost in the middle</strong></td><td>The gold chunk sits at position 9 of 15 and the model overlooks it</td><td>Put the strongest chunks first (and last); send 3–8 chunks, not 20</td></tr>
+<tr><td><strong>Missing source metadata</strong></td><td>The model can't tell which of two chunks is newer or authoritative</td><td>Include title, date, and source type in each chunk's text; tell the model how to resolve conflicts</td></tr>
+</table>
+
+<p><strong>Stage 4 — the answer (the writer)</strong></p>
+<table>
+<tr><th>Failure</th><th>What you see</th><th>Fix</th></tr>
+<tr><td><strong>Hallucination (unfaithful)</strong></td><td>The answer adds a fact no chunk contains</td><td>"Answer only from the context; if it isn't there, say so"; low temperature; require a citation for every claim; a faithfulness check before sending high-risk answers</td></tr>
+<tr><td><strong>Parametric override</strong></td><td>The context says $45, the model "knows" $25 and says $25</td><td>State that the context overrides prior knowledge; quote the source sentence; a faithfulness judge catches the mismatch</td></tr>
+<tr><td><strong>Not extracted</strong></td><td>The answer is in the context but the model misses or misreads it</td><td>Ask it to quote the relevant sentence first, then answer; fewer chunks; a stronger model for extraction-heavy tasks</td></tr>
+<tr><td><strong>Incomplete</strong></td><td>A two-part question gets half an answer</td><td>Decompose the question; prompt with a checklist of the parts; score completeness against a reference answer</td></tr>
+<tr><td><strong>Wrong specificity</strong></td><td>Too generic ("fees vary") or too detailed for the reader</td><td>Specify audience, length, and level in the prompt; add one or two example answers</td></tr>
+<tr><td><strong>Wrong format</strong></td><td>Prose where a table or JSON was required; the parser downstream breaks</td><td>Structured output with a schema; validate and retry on failure</td></tr>
+<tr><td><strong>Bad citations</strong></td><td>Cites a chunk that doesn't support the claim, or invents a citation</td><td>Cite by chunk ID only; check every cited ID was in the context and that the cited text supports the claim</td></tr>
+<tr><td><strong>Over-refusal</strong></td><td>"I don't have that information" when the context does contain it</td><td>Soften the refusal rule; track refusal rate on a set of answerable questions as its own metric</td></tr>
+<tr><td><strong>Poorly handled conflict</strong></td><td>Two chunks disagree; the model picks one silently or blends them</td><td>Tell it to prefer the newest authoritative source and to mention the conflict; fix the duplicate at ingestion</td></tr>
+<tr><td><strong>Injected instructions</strong></td><td>A retrieved document contains "ignore your rules…" and the model obeys</td><td>Treat retrieved text as data, never instructions; fence it clearly; scan documents at ingestion; keep tool permissions outside the model</td></tr>
+</table>
+
+<div class="card">
+  <div class="lbl">⚙️ In production</div>
+  <p><strong>Log every stage, or you can't trace anything.</strong> For each answer, store: the original and rewritten query, retrieved chunk IDs with scores, reranked IDs, the IDs that made it into the prompt (in order), the answer, its citations, and the model and prompt versions. Without the middle IDs, a retrieval failure and a context-assembly failure look the same.</p>
+  <p><strong>Tag failures and count them by type.</strong> Run the triage on every thumbs-down, escalation, and sampled judge failure, and chart the counts per failure type. The biggest bar is next sprint's work. A team that knows "62% of bad answers are vocabulary mismatch" adds hybrid search; a team that only knows "accuracy is 84%" swaps the model and wastes a month.</p>
+  <p><strong>One regression test per fixed failure.</strong> When you fix a failure, add that question and its gold chunk to the golden set, so CI fails if the same bug comes back. Your golden set should grow from real failures, not only from questions someone imagined.</p>
+  <p><strong>Guard the riskiest answers live.</strong> For money-moving or regulatory answers, run a fast faithfulness check before sending. If it fails, or retrieval scores are low, answer "I'm not certain" and hand off to a human rather than guess. Wrong is far more expensive than slow in a bank.</p>
+</div>
+
+<div class="warn">
+  <div class="lbl">⚠ Watch out</div>
+  <p>Don't fix a stage you haven't diagnosed. The most common waste in RAG is swapping to a bigger model for what is actually a retrieval or chunking failure: the bigger model quotes the same wrong chunk more fluently. And don't trace only the final answer. A failure that drops the gold chunk between retrieval and the prompt is invisible unless the context IDs are logged.</p>
+</div>
+
+<div class="qa">
+  <div class="q">Q. Your RAG assistant gave a wrong fee. How do you find the cause and decide the fix?</div>
+  <div class="a">A. Find the chunk that should have answered and trace it through four stages: is it in the knowledge base, did search return it in the top-k, did it survive into the prompt, and did the model use it faithfully and completely? The first "no" is the failing stage. Missing content means fixing ingestion or refusing. A retrieval miss is usually vocabulary mismatch, chunking, or ranking, fixed with hybrid search, better chunking, or a reranker. A context drop is the token budget or ordering. A generation failure is the prompt, the model, or a missing guard. <strong>Strong answer adds:</strong> name the classic failure points (missing content, missed top-ranked, not in context, not extracted, wrong format, wrong specificity, incomplete); log chunk IDs at every stage so the trace is automatic; count failures by type to prioritise; and turn every fixed failure into a regression test in the golden set.</div>
+</div>
+
+<div class="remember">
+  <div class="lbl">🧠 Remember it</div>
+  <p><strong>Trace the gold chunk: in the store? fetched? in the prompt? used well?</strong> The first "no" is the stage, and the stage tells you the fix.</p>
+</div>
+<p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
 
 <section class="topic">
@@ -14163,7 +14769,7 @@ def test_answer_quality(record):
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
 </section>
 <h2 class="part">Knowledge Layer (RAG) — End-to-End, Start to Finish</h2>
-<p class="part-intro">You have met every part on its own: ingestion, chunking, embeddings, retrieval, agentic tricks, evaluation. This chapter bolts them into one running system — first the simplest RAG that works, then the production version you would actually ship at a bank. Two complete, real examples you can read top to bottom.</p>
+<p class="part-intro">You have met every part on its own: ingestion, chunking, embeddings, retrieval, agentic tricks, evaluation. This chapter bolts them into one running system — first the simplest RAG that works, then the production version you would actually ship at a bank. Two complete, real examples you can read top to bottom. It ends with a one-page recap of every RAG topic and a table of production choices for each step.</p>
 
 <section class="topic">
 <h3>The simplest RAG that works — end to end in one file</h3>
@@ -14367,6 +14973,299 @@ print(reply if is_grounded(reply, chunks)
   <div class="lbl">🧠 Remember it</div>
   <p>Same three stages, five bank-grade additions: <strong>metadata, ACLs, hybrid, rerank, gate</strong>. Ingest it right, filter who sees it, find it two ways, re-sort it, and never serve what the context can't back up.</p>
 </div>
+</section>
+
+
+<section class="topic">
+<h3>RAG on one page: every topic in one recap</h3>
+<p class="lede">The whole RAG section on one screen: the pipeline as a picture, one line per topic, and the rules you cannot break.</p>
+
+<p>RAG in one sentence: <strong>fetch the right text for a question and let the model answer only from it</strong>, instead of from its training memory. Every topic in this section makes that loop more accurate, faster, safer, or easier to run.</p>
+
+<figure>
+  <svg viewBox="0 0 700 300" role="img" aria-label="The full RAG pipeline. Offline: sources, parse, clean, chunk, embed, index. Online: question, understand, hybrid search with ACL filter, rerank, assemble context, generate with citations, gate, answer. Evaluation and operations wrap both flows.">
+    <defs>
+      <marker id="g41rc-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" text-anchor="middle">
+      <text x="60" y="20" fill="var(--muted)" font-size="11" font-weight="700">OFFLINE · once, then on change</text>
+      <rect x="10"  y="30" width="100" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="60"  y="50" fill="var(--accent-ink)">Sources</text><text x="60"  y="66" fill="var(--muted)" font-size="10" font-weight="500">connectors, sync</text>
+      <rect x="122" y="30" width="100" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="172" y="50" fill="var(--accent-ink)">Parse</text><text x="172" y="66" fill="var(--muted)" font-size="10" font-weight="500">intake, OCR, tables</text>
+      <rect x="234" y="30" width="100" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="284" y="50" fill="var(--accent-ink)">Clean</text><text x="284" y="66" fill="var(--muted)" font-size="10" font-weight="500">PII, boilerplate</text>
+      <rect x="346" y="30" width="100" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="396" y="50" fill="var(--accent-ink)">Chunk</text><text x="396" y="66" fill="var(--muted)" font-size="10" font-weight="500">structure, ~512 tok</text>
+      <rect x="458" y="30" width="100" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="508" y="50" fill="var(--accent-ink)">Embed</text><text x="508" y="66" fill="var(--muted)" font-size="10" font-weight="500">one model only</text>
+      <rect x="570" y="30" width="120" height="48" rx="9" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/><text x="630" y="50" fill="var(--accent-ink)">Index</text><text x="630" y="66" fill="var(--muted)" font-size="10" font-weight="500">HNSW + BM25 + ACL</text>
+
+      <text x="60" y="134" fill="var(--muted)" font-size="11" font-weight="700">ONLINE · every question</text>
+      <rect x="10"  y="144" width="78" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="49"  y="172" fill="var(--accent-ink)" font-size="11">Question</text>
+      <rect x="96"  y="144" width="78" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="135" y="164" fill="var(--accent-ink)" font-size="11">Understand</text><text x="135" y="180" fill="var(--muted)" font-size="9.5" font-weight="500">rewrite, route</text>
+      <rect x="182" y="144" width="78" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="221" y="164" fill="var(--accent-ink)" font-size="11">Hybrid</text><text x="221" y="180" fill="var(--muted)" font-size="9.5" font-weight="500">+ ACL filter</text>
+      <rect x="268" y="144" width="78" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="307" y="164" fill="var(--accent-ink)" font-size="11">Rerank</text><text x="307" y="180" fill="var(--muted)" font-size="9.5" font-weight="500">50 to 5</text>
+      <rect x="354" y="144" width="78" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="393" y="164" fill="var(--accent-ink)" font-size="11">Assemble</text><text x="393" y="180" fill="var(--muted)" font-size="9.5" font-weight="500">dedup, order</text>
+      <rect x="440" y="144" width="78" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="479" y="164" fill="var(--accent-ink)" font-size="11">Generate</text><text x="479" y="180" fill="var(--muted)" font-size="9.5" font-weight="500">+ citations</text>
+      <rect x="526" y="144" width="78" height="48" rx="9" fill="var(--surface)" stroke="var(--amber)" stroke-width="2"/><text x="565" y="164" fill="var(--accent-ink)" font-size="11">Gate</text><text x="565" y="180" fill="var(--muted)" font-size="9.5" font-weight="500">grounded?</text>
+      <rect x="612" y="144" width="78" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="651" y="172" fill="var(--accent-ink)" font-size="11">Answer</text>
+
+      <rect x="10"  y="226" width="335" height="54" rx="10" fill="var(--amber-soft)" stroke="var(--amber)"/><text x="177" y="248" fill="var(--accent-ink)">Evaluate</text><text x="177" y="266" fill="var(--muted)" font-size="10" font-weight="500">golden set · recall@k · faithfulness · CI gate · live triad</text>
+      <rect x="355" y="226" width="335" height="54" rx="10" fill="var(--amber-soft)" stroke="var(--amber)"/><text x="522" y="248" fill="var(--accent-ink)">Operate</text><text x="522" y="266" fill="var(--muted)" font-size="10" font-weight="500">queues · ACL sync · deletes · re-index · cache · audit</text>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#g41rc-ar)">
+      <path d="M110 54 L120 54"/><path d="M222 54 L232 54"/><path d="M334 54 L344 54"/><path d="M446 54 L456 54"/><path d="M558 54 L568 54"/>
+      <path d="M88 168 L94 168"/><path d="M174 168 L180 168"/><path d="M260 168 L266 168"/><path d="M346 168 L352 168"/><path d="M432 168 L438 168"/><path d="M518 168 L524 168"/><path d="M604 168 L610 168"/>
+      <path d="M630 78 L630 110 L221 110 L221 142"/>
+    </g>
+  </svg>
+  <figcaption>Offline builds the index; online reads it on every question. Evaluation and operations run around both. Each box below maps to a chapter row in the tables.</figcaption>
+</figure>
+
+<h4>1. Why RAG and the big picture</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>The core idea</td><td>Fetch the right text, paste it in the prompt, and tell the model: answer only from it, cite it, or say you don't know.</td></tr>
+  <tr><td>Two flows</td><td>Indexing runs offline as a batch job. Answering runs live. Both must use the same embedding model.</td></tr>
+  <tr><td>Four problems RAG solves</td><td>Knowledge cutoff, private data, hallucinations, and missing citations. No retraining needed.</td></tr>
+  <tr><td>RAG vs fine-tuning vs long context</td><td>RAG adds knowledge, fine-tuning adds behaviour, long context suits small stable data. They stack.</td></tr>
+  <tr><td>When not to use RAG</td><td>Live facts go to an API, math to a query engine, tiny stable text straight into the prompt.</td></tr>
+  <tr><td>Maturity ladder</td><td>Ship naive RAG, measure, then climb to advanced (rewrite, hybrid, rerank). Most banks stop there.</td></tr>
+  <tr><td>Honest limits</td><td>Missed retrieval, cut chunk edges, multi-hop questions, a stale index, cost and latency, a bigger attack surface.</td></tr>
+  <tr><td>Vocabulary</td><td>Chunk, embedding, vector DB, semantic search, top-K, grounding, dense, sparse, hybrid.</td></tr>
+</table>
+
+<h4>2. Ingestion and parsing</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>The ingestion pipeline</td><td>Six stations: source, parse, clean, chunk, embed, index. A manifest tracks each document by source id and content hash.</td></tr>
+  <tr><td>Intake and safety</td><td>Check the real file type by magic bytes, virus-scan, cap the size, and split big PDFs into page ranges.</td></tr>
+  <tr><td>Data connectors</td><td>One connector per source, one record shape (<code>source_id</code>, bytes, <code>acl</code>). Sync only changes. Re-pull ACLs every sync.</td></tr>
+  <tr><td>Ingestion at scale</td><td>Queued jobs with retries and a dead-letter queue. Vectors go to the search index, rows to a columnar store, files to object storage.</td></tr>
+  <tr><td>Keeping the index fresh</td><td>Hash, delete old chunks, re-parse, embed, upsert, record. Always delete before you insert.</td></tr>
+  <tr><td>Deleting a document</td><td>Delete every chunk with one filter on <code>source_id</code>, then drop the manifest row.</td></tr>
+  <tr><td>Loading and cleaning</td><td>Drop lines that repeat on over 80% of pages, normalise text, redact PII, strip hidden injection text. Never strip metadata.</td></tr>
+  <tr><td>Parsing is the silent limit</td><td>Bad parsing never throws an error. Track empty-page and digit-soup rates and alarm when they jump.</td></tr>
+  <tr><td>PDFs and tables</td><td>Extract tables on their own, put the header on every row, one chunk per table, merge tables split across pages.</td></tr>
+  <tr><td>Hard pages</td><td>Route each block: layout-aware reading for columns, vision captions for charts, OCR at 300 DPI for scans.</td></tr>
+  <tr><td>PDF parser landscape</td><td>PyMuPDF for digital text, pdfplumber or Camelot for tables, Docling or Unstructured for mixed pages, Azure DI, Textract or Google Document AI for forms.</td></tr>
+  <tr><td>Docling</td><td>Open-source all-in-one parser with OCR, tables and reading order. Pin its version. Run it as a pooled service.</td></tr>
+  <tr><td>Choosing a parser</td><td>Use tiers: cheap parser first, escalate only pages that fail a quality gate. Vision costs 10 to 100 times more.</td></tr>
+  <tr><td>JSON and JSONL</td><td>Write each record as "path: value" lines, one record per chunk. Keep typed values. Never embed volatile fields.</td></tr>
+  <tr><td>CSV and Excel</td><td>Each row becomes a record with headers repeated. Sums and counts go to SQL or pandas, not vectors.</td></tr>
+  <tr><td>Word and PowerPoint</td><td>Headings become sections. One chunk per slide, speaker notes included. Decide what to do with tracked changes.</td></tr>
+  <tr><td>HTML and web pages</td><td>Extract the main content with trafilatura. Keep headings and the canonical URL. Render JavaScript only for empty pages.</td></tr>
+  <tr><td>XML</td><td>Parse with defusedxml to block XXE attacks. Validate against the schema. One chunk per record.</td></tr>
+  <tr><td>Email</td><td>Split the thread, strip quotes and signatures, move headers to metadata, parse attachments on their own, redact PII.</td></tr>
+  <tr><td>Video, audio and the rest</td><td>Keyframes with captions, transcript segments with timestamps, Apache Tika for rare file types.</td></tr>
+  <tr><td>Databases and APIs</td><td>Embed slow-changing rows. Query volatile data live and read-only. Load big tables into a columnar store.</td></tr>
+</table>
+
+<h4>3. Chunking</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>Why chunk at all</td><td>Embedding limits, search precision and the context budget. One huge chunk blurs into a vague vector.</td></tr>
+  <tr><td>chunk_size and chunk_overlap</td><td>Start near 512 tokens with 10 to 20% overlap. Use zero overlap for table rows and FAQ pairs.</td></tr>
+  <tr><td>Recursive splitting</td><td>Step down paragraph, line, sentence, word until each piece fits. The safe default splitter.</td></tr>
+  <tr><td>Tokens and structure</td><td>Count with the embedder's tokenizer. Split on headings first and keep the heading path as metadata.</td></tr>
+  <tr><td>Semantic chunking</td><td>Cut where meaning shifts. Try it only on long prose with no headings. Often no better than recursive.</td></tr>
+  <tr><td>Agentic, late, proposition</td><td>Parent-child (search small, return big) is the safe one. Use the others only after measuring.</td></tr>
+  <tr><td>Common gotchas</td><td>Zero overlap cuts phrases, oversized chunks get truncated silently, stripped tables leave orphan numbers.</td></tr>
+  <tr><td>Production sizing</td><td>Start from defaults. Let hit rate on a 30 to 100 question golden set pick the final size.</td></tr>
+</table>
+
+<h4>4. Embeddings and vector search</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>What an embedding is</td><td>A list of numbers that places text on a map of meaning. Good for meaning, bad for exact codes.</td></tr>
+  <tr><td>Measuring closeness</td><td>Normalise vectors, then use cosine or dot product. The index metric must match how you stored them.</td></tr>
+  <tr><td>Dense, sparse, multi-vector</td><td>Dense for meaning, sparse (BM25, SPLADE) for exact words, ColBERT per token. Hybrid with RRF is the bank default.</td></tr>
+  <tr><td>Dimensions and max tokens</td><td>Dimensions drive storage cost. Text past the token limit is cut off without warning.</td></tr>
+  <tr><td>Choosing a model</td><td>Test two or three models on your own questions. Get the query and passage prefixes right.</td></tr>
+  <tr><td>Matryoshka and quantization</td><td>Shorter vectors and fewer bits cut storage 4 to 32 times. Always rescore and measure recall.</td></tr>
+  <tr><td>Same-model rule</td><td>Queries and documents use one model and version. A model change means a full blue/green re-index.</td></tr>
+  <tr><td>What a vector DB does</td><td>Approximate search trades a little recall for a lot of speed. Track recall, p99 latency, QPS and memory together.</td></tr>
+  <tr><td>Inside the index</td><td>Flat under 100K vectors, HNSW up to a few million in RAM, IVF for big static sets, IVF-PQ or DiskANN for billions.</td></tr>
+  <tr><td>Index to retrieval, end to end</td><td>The index sets recall, rescoring fixes order, the reranker lifts precision.</td></tr>
+  <tr><td>Vector DB landscape</td><td>On Postgres already? Start with pgvector. Move only after you measure a real limit.</td></tr>
+  <tr><td>Retrieval dials</td><td>ACL filter inside the retriever, wide top-K before a reranker, MMR for variety, thresholds tuned per model.</td></tr>
+  <tr><td>Scaling the store</td><td>Bigger node and two replicas first. Shard only when the index outgrows one machine.</td></tr>
+</table>
+
+<h4>5. Smarter retrieval</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>Rewrite, multi-query, RAG-Fusion</td><td>Rephrase the question 3 to 5 ways and fuse results with RRF. Use it when recall is the bottleneck.</td></tr>
+  <tr><td>HyDE and step-back</td><td>Search with a draft answer for sparse domains, or fetch the general rule first for policy edge cases.</td></tr>
+  <tr><td>Decompose, route, self-query</td><td>Split multi-part questions, send each to the right store, turn filters into validated JSON.</td></tr>
+  <tr><td>Hybrid search</td><td>Dense plus BM25, fused with RRF (k = 60). Apply the ACL filter to both sides.</td></tr>
+  <tr><td>ColBERT late interaction</td><td>Per-token vectors give better recall at many times the storage. Use only after hybrid plus rerank falls short.</td></tr>
+  <tr><td>Parent-document and sentence-window</td><td>Search small pieces, hand the model the surrounding section.</td></tr>
+  <tr><td>Contextual retrieval and RAPTOR</td><td>Prepend a short "where this chunk comes from" note. Build summary trees for broad questions.</td></tr>
+  <tr><td>Index-time enrichment</td><td>Index generated summaries and likely questions next to each chunk. Always serve the original chunk.</td></tr>
+  <tr><td>Reranking</td><td>Fetch 50 to 100 candidates, re-score with a cross-encoder, keep the top 5. Usually the biggest single win.</td></tr>
+  <tr><td>Finishing the context</td><td>Dedup, put the best chunk first, compress only when needed, run a groundedness check.</td></tr>
+  <tr><td>Vectorless RAG</td><td>BM25, SQL, graphs or tree navigation when the match is exact, tabular or structured.</td></tr>
+  <tr><td>Open Knowledge Format</td><td>Curated Markdown fact bundles that agents read word for word, routed beside embedding RAG.</td></tr>
+  <tr><td>Caching</td><td>Cache embeddings, retrievals, answers (similarity 0.93 or more, per user) and the prompt prefix. Clear on re-index.</td></tr>
+</table>
+
+<h4>6. Agentic and frontier RAG</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>Agentic RAG</td><td>The model decides whether, where and how often to search. Cap steps and time.</td></tr>
+  <tr><td>Self-RAG</td><td>The model asks if it needs to search, grades what it found, and checks its answer is grounded.</td></tr>
+  <tr><td>Corrective RAG (CRAG)</td><td>Grade each document. Weak results trigger a fallback to approved sources, never the open web.</td></tr>
+  <tr><td>Adaptive RAG</td><td>A cheap router sends easy questions down a cheap path and hard ones down a careful path.</td></tr>
+  <tr><td>GraphRAG</td><td>Walk a knowledge graph for "how is X linked to Y" questions, such as fraud rings.</td></tr>
+  <tr><td>Multimodal RAG</td><td>Retrieve page images, tables and charts, then let a vision model read them.</td></tr>
+  <tr><td>RAFT</td><td>Fine-tune the model to use good context and ignore distractors. Last resort.</td></tr>
+  <tr><td>Conversational RAG</td><td>Rewrite each follow-up into a standalone question using the last few turns.</td></tr>
+  <tr><td>How they fit together</td><td>Add one technique per measured failure. Cheap checks early, expensive checks late.</td></tr>
+  <tr><td>Building the knowledge graph</td><td>Extract triples with a fixed schema, merge duplicate entities, cluster communities, update incrementally.</td></tr>
+  <tr><td>Memory-augmented RAG</td><td>Search the user's own history beside the documents. Always filter by user id.</td></tr>
+</table>
+
+<h4>7. Evaluation</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>Grade the two machines separately</td><td>Score retrieval and generation apart, so you know which one to fix.</td></tr>
+  <tr><td>Failure types and remedies</td><td>Trace the right chunk through knowledge base, search, prompt and answer. The first miss names the fix.</td></tr>
+  <tr><td>Retrieval metrics</td><td>Hit rate, recall@k, precision@k, MRR, MAP, NDCG. Fix recall first, then ranking.</td></tr>
+  <tr><td>Generation metrics</td><td>Faithfulness, answer relevancy, answer correctness. Faithfulness is the compliance metric.</td></tr>
+  <tr><td>The RAG Triad</td><td>Context relevance, groundedness, answer relevance. The always-on live monitor.</td></tr>
+  <tr><td>Golden dataset</td><td>Start with 50 to 100 real questions, gold answers and chunk ids. Version it in git.</td></tr>
+  <tr><td>LLM-as-a-judge</td><td>Give it a rubric, use a different model family, and check its agreement with humans.</td></tr>
+  <tr><td>Offline vs online</td><td>The golden set gates releases. Sampled live traffic catches new failures.</td></tr>
+  <tr><td>Eval in CI</td><td>Fail the build when faithfulness drops below 0.9 or context recall below 0.8.</td></tr>
+</table>
+
+<h4>8. End to end</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>The simplest RAG</td><td>Load, chunk, embed, store, retrieve, generate. About twenty lines.</td></tr>
+  <tr><td>Production RAG</td><td>Add metadata, ACL filters, hybrid search, a reranker and a grounding gate.</td></tr>
+</table>
+
+<h4>9. Platform and operations</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>The queue layer</td><td>Each stage is a queued job with retries, backpressure and fair sharing between tenants.</td></tr>
+  <tr><td>Connectors at scale</td><td>Discover sources, re-crawl on a schedule, prefer webhooks for changes.</td></tr>
+  <tr><td>Permission-aware retrieval</td><td>Filter on each chunk's ACL against groups synced from the identity provider.</td></tr>
+  <tr><td>Multi-tenant isolation</td><td>A mandatory tenant filter in every query, plus per-tenant capacity limits.</td></tr>
+  <tr><td>The deletion lifecycle</td><td>Tombstone first, delete from every store with retries, sweep orphans afterwards.</td></tr>
+  <tr><td>Re-indexing and model migration</td><td>Build a new index, test it, switch the alias, retire the old one.</td></tr>
+  <tr><td>Pipeline selection</td><td>Pick the flow per document type. Check parser, chunker and model fit before running.</td></tr>
+  <tr><td>Schema discovery</td><td>Map different field names from each source to one shared vocabulary.</td></tr>
+  <tr><td>Business rules and boosting</td><td>Pin, bury and synonym rules applied after fusion. Log every rule that fires.</td></tr>
+  <tr><td>Answers, citations, confidence</td><td>Cite every claim with a link. Low confidence hands off to a human.</td></tr>
+  <tr><td>Agent integration</td><td>The knowledge base is a search tool that carries the user's identity.</td></tr>
+  <tr><td>Quality and analytics</td><td>Watch zero-result queries, low-confidence clusters and cost per query, split by tenant and language.</td></tr>
+  <tr><td>Model access control</td><td>Each project has an approved list of chat and embedding models.</td></tr>
+  <tr><td>Resilience, scaling, audit</td><td>Retries, circuit breakers, timeouts and an append-only audit log.</td></tr>
+</table>
+
+<h4>The non-negotiables</h4>
+<ul>
+  <li><strong>Access control lives in the retriever, never the prompt.</strong> Filter on each chunk's <code>acl</code>, from groups synced with the identity provider.</li>
+  <li><strong>Delete old chunks before you insert new ones.</strong> Otherwise the index serves two versions of the truth.</li>
+  <li><strong>Answer only from the context, cite every claim, gate ungrounded answers.</strong> An invented fee is a compliance incident.</li>
+  <li><strong>One embedding model for queries and documents.</strong> Re-index blue/green whenever the model changes.</li>
+  <li><strong>Send live facts and math elsewhere.</strong> Balances go to an API, sums go to SQL.</li>
+  <li><strong>Carry metadata on every chunk:</strong> <code>source</code>, <code>source_id</code>, <code>page</code>, <code>section</code>, <code>acl</code>, version. It powers citations, filters, deletes and security.</li>
+  <li><strong>Measure before you tune.</strong> Recall@k and faithfulness on a golden set, in CI, before every release.</li>
+</ul>
+
+<div class="key">
+  <div class="lbl">💡 If you remember five things</div>
+  <p>(1) RAG quality is mostly <strong>parsing and retrieval</strong> quality, not prompt wording. (2) <strong>Hybrid search plus a reranker</strong> is the strong default. (3) <strong>Ground and cite</strong>, and refuse when unsure. (4) <strong>Access control and freshness</strong> are where production RAG really fails. (5) When an answer is wrong, <strong>trace the chunk</strong> through each stage before you change the model.</p>
+</div>
+
+<div class="qa">
+  <div class="q">Q. "Explain RAG end to end in two minutes."</div>
+  <div class="a">A. Offline, connectors pull documents. We parse, clean, chunk on structure, embed with one model, and index with ACLs. Online, we rewrite the question, run hybrid search filtered to the user, rerank to five chunks, and generate with citations. A grounding gate blocks unsupported answers. <strong>Strong answer adds:</strong> a golden set and CI gate guard every release, and the platform handles sync, deletes, re-indexing and audit.</div>
+</div>
+
+<div class="remember">
+  <div class="lbl">🧠 Remember it</div>
+  <p>Parse it well, chunk it on structure, embed it once, find it two ways, rerank it, cite it, gate it, measure it, keep it fresh.</p>
+</div>
+
+<p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🧭 recap</span></p>
+</section>
+
+
+<section class="topic">
+<h3>Production choices at every step: options, defaults, and when to switch</h3>
+<p class="lede">One table for every RAG decision: the options, what to pick for production, and when another option wins.</p>
+
+<p>Read each row left to right. Start with the default. Switch only when you measure the problem in the last column.</p>
+
+<table>
+  <tr><th>Step</th><th>Options</th><th>Production default (why)</th><th>Pick another when</th></tr>
+  <tr><td><strong>Source sync</strong></td><td>full crawl, scheduled polling, webhooks</td><td>Incremental sync on change tokens, plus webhooks (minutes, not hours)</td><td>Full crawl for the first load, or after a connector bug</td></tr>
+  <tr><td><strong>Connectors</strong></td><td>custom-built, managed connector</td><td>Managed, if it carries each file's ACL into metadata</td><td>Custom when the managed one drops ACLs or misses a source</td></tr>
+  <tr><td><strong>Intake</strong></td><td>trust the extension, magic bytes + virus scan</td><td>Magic bytes, ClamAV, size cap, page-range split (files are untrusted)</td><td>Never skip it</td></tr>
+  <tr><td><strong>Parse: digital PDF</strong></td><td>PyMuPDF, pypdf, pdfium</td><td>PyMuPDF (fast, accurate)</td><td>pypdf or pdfium if the AGPL licence is a problem</td></tr>
+  <tr><td><strong>Parse: tables</strong></td><td>pdfplumber, Camelot, vision model</td><td>pdfplumber or Camelot lattice, one chunk per table</td><td>Vision only when both fail; sums go to SQL</td></tr>
+  <tr><td><strong>Parse: mixed layouts</strong></td><td>Docling, Unstructured, LlamaParse, Reducto, vision</td><td>Tiered: cheap parser, quality gate, escalate to Docling, then vision</td><td>Hosted parser only when data may leave the bank</td></tr>
+  <tr><td><strong>Parse: forms, KYC, statements</strong></td><td>Azure DI, AWS Textract, Google Document AI</td><td>The one on your cloud (field confidence, SLA)</td><td>On-prem rules: Docling plus Tesseract</td></tr>
+  <tr><td><strong>Parse: scans (OCR)</strong></td><td>Tesseract, Azure DI, Textract, Google Document AI, vision</td><td>Tesseract on-prem for clean scans, at 300 DPI</td><td>Cloud Document AI for messy pages and handwriting</td></tr>
+  <tr><td><strong>Parse: web pages</strong></td><td>trafilatura, readability, BeautifulSoup, Playwright</td><td>trafilatura, with an &lt;article&gt; / &lt;main&gt; fallback</td><td>Playwright only when the page is an empty JavaScript shell</td></tr>
+  <tr><td><strong>Parse: XML, email, media</strong></td><td>defusedxml, Python email, extract-msg, FFmpeg, gpt-4o-transcribe, Whisper, Apache Tika</td><td>defusedxml for XML, Python email for .eml, gpt-4o-transcribe for audio</td><td>Whisper for word-level timestamps; Tika for rare file types</td></tr>
+  <tr><td><strong>Structured data</strong></td><td>embed rows, live query, columnar store</td><td>Volatile data: live read-only query. Big tables: columnar store</td><td>Embed rows only for slow-changing text</td></tr>
+  <tr><td><strong>Cleaning</strong></td><td>per-document regex, frequency rules, per-source profiles</td><td>Frequency boilerplate removal, PII redaction, injection strip</td><td>Add a profile per new source type</td></tr>
+  <tr><td><strong>PII redaction</strong></td><td>regex rules, Microsoft Presidio</td><td>Presidio plus regex for card and account numbers, before embedding</td><td>Regex alone only for fixed formats</td></tr>
+  <tr><td><strong>Chunking</strong></td><td>fixed, recursive, structure-aware, semantic, parent-child, late, agentic, proposition</td><td>Structure-aware then recursive, 256 to 512 tokens, 10 to 20% overlap</td><td>Parent-child for "right sentence, missing context"; semantic for long prose with no headings</td></tr>
+  <tr><td><strong>Enrichment</strong></td><td>none, contextual retrieval, hypothetical questions, summaries, RAPTOR</td><td>None for small clean sets</td><td>Contextual retrieval when chunks lose identity; RAPTOR for broad questions</td></tr>
+  <tr><td><strong>Embedding model</strong></td><td>OpenAI 3-small / 3-large, Cohere, Voyage, Gemini, BGE-M3, E5, Nomic, Qwen3</td><td>text-embedding-3-small hosted, or BGE-M3 self-hosted</td><td>3-large for top accuracy; self-host for data residency; multilingual: BGE-M3</td></tr>
+  <tr><td><strong>Vector size</strong></td><td>float32, Matryoshka cut, int8, binary</td><td>Full precision until memory hurts</td><td>int8 or binary with a rescore pass, after measuring recall</td></tr>
+  <tr><td><strong>Similarity metric</strong></td><td>cosine, dot product, Euclidean</td><td>Normalise, then cosine or dot</td><td>Euclidean for clustering or images</td></tr>
+  <tr><td><strong>Index type</strong></td><td>Flat, HNSW, IVF, IVF-PQ, DiskANN</td><td>HNSW (best recall per ms in RAM)</td><td>Flat under 100K; IVF-PQ or DiskANN for billions</td></tr>
+  <tr><td><strong>Vector database</strong></td><td>pgvector, Qdrant, Weaviate, Milvus, Pinecone, Elasticsearch/OpenSearch, Chroma, FAISS</td><td>pgvector if you run Postgres; Qdrant or Weaviate for native hybrid</td><td>Pinecone when ops staff are thin; Milvus at billions; Chroma or FAISS for prototypes</td></tr>
+  <tr><td><strong>Query understanding</strong></td><td>rewrite, multi-query, RAG-Fusion, HyDE, step-back, decomposition, routing, self-query</td><td>Routing and self-query; conversational rewrite on follow-ups</td><td>Multi-query when recall is low; HyDE for sparse domains; decomposition for multi-part questions</td></tr>
+  <tr><td><strong>Retrieval</strong></td><td>dense, BM25, hybrid, ColBERT, SQL, graph</td><td>Hybrid with RRF (k = 60), ACL pre-filter</td><td>ColBERT after a measured recall limit; graph for relationships</td></tr>
+  <tr><td><strong>Retrieval dials</strong></td><td>top-K, MMR, score threshold</td><td>Top-K 20 to 50 before rerank</td><td>MMR (λ 0.5 to 0.7) when near-duplicates crowd results</td></tr>
+  <tr><td><strong>Access control</strong></td><td>prompt instruction, post-filter, pre-filter in the retriever</td><td>Pre-filter on each chunk's <code>acl</code>, groups synced from the identity provider</td><td>Never in the prompt; post-filter can return too few results</td></tr>
+  <tr><td><strong>Multi-tenancy</strong></td><td>shared index with tenant filter, per-tenant collections</td><td>Shared index, tenant filter built into every query</td><td>Per-tenant collections when a contract demands hard isolation</td></tr>
+  <tr><td><strong>Reranker</strong></td><td>Cohere rerank-v3.5, Voyage rerank-2.5, Jina, bge-reranker-v2-m3, Qwen3-Reranker</td><td>On, keep top 3 to 5 (biggest relevance lift)</td><td>Self-hosted bge or Qwen3 when data may not leave; off only if latency is measured critical</td></tr>
+  <tr><td><strong>Context assembly</strong></td><td>dedup, reorder, compression, parent expansion</td><td>Dedup and best-chunk-first, 3 to 8 chunks</td><td>Compression only for large or noisy context</td></tr>
+  <tr><td><strong>Generation</strong></td><td>small fast model, large model, fine-tuned (RAFT)</td><td>Small model, temperature 0, "answer only from context, cite"</td><td>Large model for multi-hop synthesis; RAFT as last resort</td></tr>
+  <tr><td><strong>Grounding gate</strong></td><td>none, LLM yes/no judge, NLI model, citation per claim</td><td>LLM judge on money and policy answers</td><td>NLI model at high volume; skip for low-risk lookups</td></tr>
+  <tr><td><strong>Advanced patterns</strong></td><td>conversational, adaptive, CRAG, Self-RAG, agentic, GraphRAG, multimodal</td><td>Conversational rewrite plus a router</td><td>Add each only for a failure you measured</td></tr>
+  <tr><td><strong>Multimodal</strong></td><td>describe then embed, page-image embedding (ColPali), layout-aware parsing</td><td>Text retrieval for born-digital documents</td><td>Page-image retrieval for scanned or table-heavy documents</td></tr>
+  <tr><td><strong>Knowledge graph</strong></td><td>LLMGraphTransformer, LlamaIndex PropertyGraphIndex, Microsoft GraphRAG, Neo4j</td><td>None, until questions are about links between entities</td><td>Prototype with LLMGraphTransformer; PropertyGraphIndex for schema control; Microsoft GraphRAG for global questions</td></tr>
+  <tr><td><strong>Curated facts</strong></td><td>embedding RAG, OKF bundles</td><td>Embedding RAG</td><td>OKF for a small set of high-trust facts, behind a router</td></tr>
+  <tr><td><strong>User memory</strong></td><td>session history only, Mem0, Zep, Letta</td><td>Session history only</td><td>A memory store when users return across sessions; always filter by user id</td></tr>
+  <tr><td><strong>Ranking rules</strong></td><td>none, pin, bury, boost, synonym lists</td><td>None; fix retrieval first</td><td>Pin or boost when the business mandates an answer; log every rule that fires</td></tr>
+  <tr><td><strong>Caching</strong></td><td>embedding, retrieval, semantic answer, prompt prefix</td><td>Embedding and prompt-prefix cache</td><td>Semantic answer cache at 0.93 or more, per user and ACL</td></tr>
+  <tr><td><strong>Golden set</strong></td><td>hand-written, mined from logs, synthetic (RAGAS TestsetGenerator)</td><td>50 to 100 real questions; experts write the high-stakes ones</td><td>Grow to 100 to 500 in production; synthetic only to fill gaps</td></tr>
+  <tr><td><strong>LLM judge</strong></td><td>same model, different model family, ensemble</td><td>Different family, temperature 0, rubric, checked against human labels</td><td>Ensemble of judges for high-stakes answers</td></tr>
+  <tr><td><strong>Live monitoring</strong></td><td>none, sampled triad, full scoring</td><td>Retrieval scores on all traffic, faithfulness on a 1 to 5% sample</td><td>Raise the sample after a release or an incident</td></tr>
+  <tr><td><strong>Eval tooling</strong></td><td>RAGAS, DeepEval, TruLens, Phoenix, Langfuse, LangSmith</td><td>DeepEval or RAGAS in CI, Phoenix or Langfuse self-hosted live</td><td>LangSmith if you use LangChain and SaaS is allowed</td></tr>
+  <tr><td><strong>Release gate</strong></td><td>manual review, CI gate</td><td>Faithfulness 0.9 or more, context recall 0.8 or more, about 50 questions per PR</td><td>Full set (about 500) nightly</td></tr>
+  <tr><td><strong>Job queue</strong></td><td>Celery, BullMQ, SQS, RQ</td><td>Match your stack: Celery for Python, BullMQ for Node</td><td>SQS when you want it managed on AWS</td></tr>
+  <tr><td><strong>Re-index</strong></td><td>in place, blue/green</td><td>Blue/green with an alias swap</td><td>In place only for a small dev index</td></tr>
+  <tr><td><strong>Delete</strong></td><td>single delete, cross-store saga</td><td>Tombstone, then saga across every store</td><td>Never a single delete once you have more than one store</td></tr>
+  <tr><td><strong>Model governance</strong></td><td>any model, per-project allowlist</td><td>Allowlist of chat and embedding models per project</td><td>Never open; residency and vendor approval decide</td></tr>
+  <tr><td><strong>Scaling</strong></td><td>bigger node, replicas, sharding, tiering</td><td>Bigger node plus two replicas</td><td>Shard when the index outgrows one node's RAM; tier cold data</td></tr>
+</table>
+
+<div class="warn">
+  <div class="lbl">⚠ Watch out</div>
+  <p>Do not pick every "advanced" option on day one. Each one adds latency, cost and a new way to fail. Ship the defaults, run the golden set, and change one row at a time.</p>
+</div>
+
+<div class="qa">
+  <div class="q">Q. "Which vector database and embedding model would you pick for a bank?"</div>
+  <div class="a">A. pgvector if the bank runs Postgres, else Qdrant for native hybrid search. Embeddings: text-embedding-3-small through the bank's cloud tenant, or BGE-M3 self-hosted when data may not leave. <strong>Strong answer adds:</strong> I would test two or three models on 100 real questions before deciding.</div>
+</div>
+
+<div class="remember">
+  <div class="lbl">🧠 Remember it</div>
+  <p>Default first, measure second, switch one row at a time.</p>
+</div>
+
+<p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🧭 cheat-sheet</span></p>
 </section>
 <h2 class="part">Knowledge Layer (RAG) — Platform &amp; Operations</h2>
 <p class="part-intro">The earlier chapters build the data path: file to chunk to ranked answer. Running that path as a real multi-tenant product adds a whole architecture around it — queues, permissions, tenant isolation, a deletion lifecycle, re-indexing, governance, analytics and audit. This chapter is that platform layer, the part most courses skip and most production teams spend the majority of their time on.</p>
@@ -14672,9 +15571,9 @@ def apply_rules(query, ranked):
 
 <section class="topic">
 <h3>Agent integration — the knowledge base as a tool</h3>
-<p class="lede">In an agent platform, RAG isn't the whole app — it's one tool the agent calls when it decides it needs to look something up.</p>
+<p class="lede">In an agent app, RAG isn't the whole app — it's one tool the agent calls when it decides it needs to look something up.</p>
 
-<p>An agent (an ABL/LangGraph flow) exposes the knowledge base as a <strong>search tool</strong>: the model calls it with a query when reasoning needs grounding, exactly like the retrieval-tool pattern from the Agentic RAG chapter. Two platform touches: the tool call carries the user's identity so permission-aware retrieval still applies inside the tool, and a <strong>pre-search</strong> on fast paths (an obvious FAQ-style question) can retrieve <em>before</em> the agent's first turn, so the model answers in one hop instead of deciding to search and then searching. The KB tool is where the RAG platform and the agent platform meet.</p>
+<p>An agent (a LangGraph graph or an OpenAI Agents SDK agent) exposes the knowledge base as a <strong>search tool</strong>: the model calls it with a query when reasoning needs grounding, exactly like the retrieval-tool pattern from the Agentic RAG chapter. Two platform touches: the tool call carries the user's identity so permission-aware retrieval still applies inside the tool, and a <strong>pre-search</strong> on fast paths (an obvious FAQ-style question) can retrieve <em>before</em> the agent's first turn, so the model answers in one hop instead of deciding to search and then searching. The KB tool is where the RAG system and the agent meet.</p>
 </section>
 
 
@@ -14722,62 +15621,6 @@ def check_model(project, kind, model):
 </div>
 
 <p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🏦 banking</span></p>
-</section>
-
-
-<section class="topic">
-<h3>RAG on one page — the high-level recap</h3>
-<p class="lede">The whole RAG section on one screen: the pipeline in order, the decisions that matter, and the rules you can't break. Skim this; open the chapter when a line matters.</p>
-
-<p>RAG in one sentence: <strong>fetch the right text for a question and let the model answer from it</strong>, instead of from its training memory. Everything else is making that accurate, fast, safe and operable.</p>
-
-<h4>The pipeline, end to end</h4>
-<table>
-  <tr><th>Stage</th><th>What it does</th><th>The one decision that matters</th><th>Chapter</th></tr>
-  <tr><td><strong>Ingest</strong></td><td>file → clean text + metadata + ACL</td><td>parse quality caps everything downstream</td><td>Ingestion</td></tr>
-  <tr><td><strong>Chunk</strong></td><td>text → right-sized pieces</td><td>cut on structure; keep a table whole; ~512 tokens</td><td>Chunking</td></tr>
-  <tr><td><strong>Embed</strong></td><td>chunk → vector</td><td>pick one model; never mix models in an index</td><td>Embeddings</td></tr>
-  <tr><td><strong>Index</strong></td><td>vectors → fast store</td><td>HNSW + metadata/ACL filters</td><td>Embeddings</td></tr>
-  <tr><td><strong>Retrieve</strong></td><td>question → candidate chunks</td><td>hybrid (dense + sparse) beats either alone</td><td>Retrieval</td></tr>
-  <tr><td><strong>Rerank</strong></td><td>candidates → the best few</td><td>a cross-encoder is the single biggest relevance lift</td><td>Retrieval</td></tr>
-  <tr><td><strong>Generate</strong></td><td>chunks → answer</td><td>answer only from context, cite every claim</td><td>Intro / Capstone</td></tr>
-  <tr><td><strong>Evaluate</strong></td><td>is it actually right?</td><td>grade retrieval and generation separately</td><td>Evaluation</td></tr>
-  <tr><td><strong>Operate</strong></td><td>keep it fresh, safe, fast</td><td>queues, permissions, deletion saga, audit</td><td>Platform</td></tr>
-</table>
-
-<h4>The decisions cheat-sheet</h4>
-<table>
-  <tr><th>Question</th><th>Sensible default</th><th>Change it when…</th></tr>
-  <tr><td>Chunk size / overlap</td><td>~512 tokens, 10–20% overlap</td><td>bigger for synthesis answers; smaller for sharp factoids</td></tr>
-  <tr><td>Dense or hybrid?</td><td>hybrid (dense + BM25)</td><td>pure dense only if you never need exact codes/terms</td></tr>
-  <tr><td>Rerank?</td><td>on — it's the biggest quality win</td><td>off only when latency is critical and measured</td></tr>
-  <tr><td>Vectors at all?</td><td>vectors for meaning</td><td>BM25 / SQL / graph / OKF for exact, tabular or curated facts</td></tr>
-  <tr><td>Embedding model</td><td>text-embedding-3-small or BGE-M3</td><td>…-3-large for top accuracy; multilingual → BGE-M3</td></tr>
-  <tr><td>Index-time enrichment?</td><td>add for fragmented, jargon-heavy corpora</td><td>skip for small, clean collections</td></tr>
-  <tr><td>One library or many?</td><td>one all-in-one (Docling / cloud) to start</td><td>a focused stack when scale or control demands it</td></tr>
-</table>
-
-<h4>The non-negotiables</h4>
-<ul>
-  <li><strong>Access control lives in the retriever, never the prompt</strong> — filter on each chunk's <code>acl</code>, from IdP-synced groups.</li>
-  <li><strong>Delete old chunks before inserting new</strong> — or the index serves two versions of the truth.</li>
-  <li><strong>Answer only from the retrieved context, cite every claim, and gate ungrounded answers</strong> — a confident invented fact is a compliance incident.</li>
-  <li><strong>Same embedding model for query and documents</strong>, and re-index (blue/green) whenever the model changes.</li>
-  <li><strong>Measure before you tune</strong> — retrieval hit rate and faithfulness on a golden set, in CI, before every release.</li>
-  <li><strong>Carry metadata on every chunk</strong> — <code>source</code>, <code>source_id</code>, <code>page</code>, <code>section</code>, <code>acl</code> — it powers citations, filters and security.</li>
-</ul>
-
-<div class="key">
-  <div class="lbl">💡 If you remember five things</div>
-  <p>(1) RAG quality is mostly <strong>retrieval</strong> quality, not prompt wording. (2) <strong>Hybrid + rerank</strong> is the strong default. (3) <strong>Ground and cite</strong>, and refuse when unsure. (4) <strong>Access control and freshness</strong> are where production RAG actually fails — ACL in the retriever, delete-before-insert, re-index on model change. (5) A RAG <em>platform</em> is queues, permissions, a deletion saga, and audit around the data path — that's the 90% past the demo.</p>
-</div>
-
-<div class="remember">
-  <div class="lbl">🧠 Remember it</div>
-  <p>Ingest → chunk → embed → index → retrieve → rerank → generate → evaluate → operate. Hybrid retrieval, rerank, ground-and-cite, ACL in the retriever, delete-before-insert, measure before you tune. That's RAG, from a demo to a platform.</p>
-</div>
-
-<p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🧭 recap</span></p>
 </section>
 <h2 class="part">AI Agents — The agent loop &amp; when to use one</h2>
 <p class="part-intro">Let's meet the AI that doesn't just answer — it decides what to do next, takes an action, looks at the result, and keeps going until the job is done. We'll build the idea slowly, in plain words, with our bank "NorthBank" as the running example.</p>
@@ -21241,6 +22084,230 @@ with PostgresSaver.from_conn_string(DB_URL) as saver:  <span class="cmt"># one d
   <p><strong>Teams, then a boss over the team leads.</strong> A compiled team is just a node — <code>.compile(name=...)</code> and drop it into the next supervisor. Each layer costs one more routing call, so add layers only when the org chart truly needs them.</p>
 </div>
 </section>
+<h2 class="part">AI Agents — Recap &amp; Production Choices</h2>
+<p class="part-intro">The whole AI Agents part on two pages: a one-page recap of every topic, then one table of production choices for each design decision. Read it to review, or before an interview.</p>
+
+<section class="topic">
+<h3>AI Agents on one page: every topic in one recap</h3>
+<p class="lede">The whole AI Agents part on one screen: the loop as a picture, one line per topic, and the rules you cannot break.</p>
+
+<p>An agent in one sentence: <strong>a model in a bounded loop that picks its own next step, calls tools, reads the results, and stops when the goal is met or a budget runs out</strong>. Agent = model + tools + loop + memory. Every topic in this part makes that loop smarter, safer, cheaper, or better at working with others.</p>
+
+<figure>
+  <svg viewBox="0 0 700 290" role="img" aria-label="The agent loop. A goal enters a guarded loop of reason, act with a tool call, observe the result, and decide whether done. The loop repeats until done or a cap on steps, seconds or tokens is hit. Risky actions pass a human gate before the answer. Four supports feed the loop: tools and MCP, memory and context, reasoning patterns, and multi-agent patterns with A2A.">
+    <defs>
+      <marker id="g75rc-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="12" font-weight="600" text-anchor="middle">
+      <rect x="10" y="58" width="80" height="44" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="50" y="84" fill="var(--accent-ink)">Goal</text>
+
+      <rect x="110" y="18" width="370" height="140" rx="12" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+      <text x="295" y="36" fill="var(--muted)" font-size="11" font-weight="700">THE GUARDED LOOP</text>
+      <rect x="124" y="58" width="76" height="44" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="162" y="84" fill="var(--accent-ink)">Reason</text>
+      <rect x="214" y="58" width="76" height="44" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="252" y="77" fill="var(--accent-ink)">Act</text><text x="252" y="92" fill="var(--muted)" font-size="10" font-weight="500">tool call</text>
+      <rect x="304" y="58" width="76" height="44" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="342" y="77" fill="var(--accent-ink)">Observe</text><text x="342" y="92" fill="var(--muted)" font-size="10" font-weight="500">real result</text>
+      <rect x="394" y="58" width="76" height="44" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="432" y="77" fill="var(--accent-ink)">Done?</text><text x="432" y="92" fill="var(--muted)" font-size="10" font-weight="500">or cap hit</text>
+      <text x="295" y="148" fill="var(--muted)" font-size="10" font-weight="500">caps on every loop: steps · seconds · tokens</text>
+
+      <rect x="500" y="58" width="80" height="44" rx="9" fill="var(--surface)" stroke="var(--amber)" stroke-width="2"/><text x="540" y="77" fill="var(--accent-ink)">Gate</text><text x="540" y="92" fill="var(--muted)" font-size="10" font-weight="500">if risky</text>
+      <rect x="600" y="58" width="90" height="44" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="645" y="84" fill="var(--accent-ink)">Answer</text>
+
+      <rect x="10"  y="196" width="160" height="62" rx="10" fill="var(--amber-soft)" stroke="var(--amber)"/><text x="90"  y="220" fill="var(--accent-ink)">Tools</text><text x="90"  y="238" fill="var(--muted)" font-size="10" font-weight="500">schemas · routing · MCP</text>
+      <rect x="185" y="196" width="160" height="62" rx="10" fill="var(--amber-soft)" stroke="var(--amber)"/><text x="265" y="220" fill="var(--accent-ink)">Memory &amp; context</text><text x="265" y="238" fill="var(--muted)" font-size="10" font-weight="500">window · long-term · checkpoints</text>
+      <rect x="360" y="196" width="160" height="62" rx="10" fill="var(--amber-soft)" stroke="var(--amber)"/><text x="440" y="220" fill="var(--accent-ink)">Reasoning</text><text x="440" y="238" fill="var(--muted)" font-size="10" font-weight="500">CoT · ReAct · plan · reflect</text>
+      <rect x="535" y="196" width="155" height="62" rx="10" fill="var(--amber-soft)" stroke="var(--amber)"/><text x="612" y="220" fill="var(--accent-ink)">Multi-agent</text><text x="612" y="238" fill="var(--muted)" font-size="10" font-weight="500">router · orchestrator · A2A</text>
+    </g>
+    <g fill="none" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#g75rc-ar)">
+      <path d="M90 80 L108 80"/><path d="M200 80 L212 80"/><path d="M290 80 L302 80"/><path d="M380 80 L392 80"/>
+      <path d="M432 102 L432 122 L162 122 L162 104"/>
+      <path d="M480 80 L498 80"/><path d="M580 80 L598 80"/>
+    </g>
+    <g fill="none" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="4 4">
+      <path d="M90 196 L160 158"/><path d="M265 196 L265 158"/><path d="M440 196 L420 158"/><path d="M612 196 L480 140"/>
+    </g>
+  </svg>
+  <figcaption>The loop reasons, acts, observes and decides, under hard caps. Risky actions pass a human gate. Tools, memory, reasoning patterns and multi-agent designs all plug into the same loop.</figcaption>
+</figure>
+
+<h4>1. The agent loop and when to use one</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>What makes software agentic</td><td>The model picks its own next step. Agent = model + tools + loop + memory.</td></tr>
+  <tr><td>Agent vs LLM vs RAG vs workflow</td><td>The test is who chooses the control flow: your code or the model. Set agency as low as the task allows.</td></tr>
+  <tr><td>When to use an agent</td><td>If you can draw the steps in advance, script them. Agents are for paths you cannot draw.</td></tr>
+  <tr><td>The agent loop in depth</td><td>Perceive, reason, act, observe, reflect, stop. Never ship without a hard step, token and time cap.</td></tr>
+  <tr><td>Honest limitations</td><td>Errors compound (95% per step over 10 steps is about 60%). Cap, validate, log, and gate money moves.</td></tr>
+</table>
+
+<h4>2. Tools and function calling</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>What a tool is</td><td>The model only asks. Your code runs the function. Never treat "asked" as "done".</td></tr>
+  <tr><td>The tool definition</td><td>Name, purpose and a strict JSON Schema. A schema checks shape, so re-check ownership and limits on the server.</td></tr>
+  <tr><td>Names and descriptions</td><td>Verb-first names. Each description says when to use it and when not to.</td></tr>
+  <tr><td>Native function calling</td><td>Propose, execute, observe, answer. The call id links result to request. Use the Responses API for new OpenAI work.</td></tr>
+  <tr><td>Tool routing</td><td>Accuracy drops past 10 to 20 tools. Show a small relevant set through a router, or search over tools at hundreds.</td></tr>
+  <tr><td>Parallel tool calls</td><td>Run independent reads at once. Anything that changes state runs alone, in order.</td></tr>
+  <tr><td>Errors and retries</td><td>Return errors as data. Retry only timeouts, 429 and 503, and only reads or writes with an idempotency key.</td></tr>
+  <tr><td>Banking tool catalog by risk</td><td>Read, knowledge and action tiers. Action tools get idempotency, step-up identity, limits and human approval.</td></tr>
+  <tr><td>Computer use and lean returns</td><td>Computer use only when no API exists. Few tools, tight budgets, least privilege, small tool results.</td></tr>
+  <tr><td>CodeAct</td><td>The model writes a small program that calls tools. Run it only in a real sandbox, never in your app.</td></tr>
+</table>
+
+<h4>3. Reasoning and planning</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>Chain of Thought</td><td>More reasoning tokens help multi-step problems. Use a calculator tool for money math. Never show raw reasoning to customers.</td></tr>
+  <tr><td>ReAct</td><td>Think, act, observe, repeat. The default when the agent must touch the real world.</td></tr>
+  <tr><td>Plan-and-Execute</td><td>A strong model plans once, a cheap model runs each step. Good for long, predictable jobs.</td></tr>
+  <tr><td>Tree of Thoughts</td><td>Branch, score, prune. Very costly. Only for rare, high-stakes search problems.</td></tr>
+  <tr><td>Reflection and Reflexion</td><td>Check drafts against real evidence, not opinion. Cap the retries, then hand to a human.</td></tr>
+  <tr><td>Task decomposition</td><td>Model subtasks as a graph. Run independent branches in parallel, respect real dependencies.</td></tr>
+  <tr><td>Replanning</td><td>Re-plan when reality changes, but cap steps and replans, and escalate when a cap trips.</td></tr>
+</table>
+
+<h4>4. Memory and context engineering</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>Short-term memory</td><td>The context window is the agent's RAM: fast, finite, wiped at session end. Manage it as a budget.</td></tr>
+  <tr><td>Long-term memory</td><td>Episodic (events), semantic (facts), procedural (how-to). Store outside the window, scoped per customer.</td></tr>
+  <tr><td>Recall is retrieval</td><td>Search past memories filtered by <code>user_id</code> from the session, re-ranked by recency.</td></tr>
+  <tr><td>Forgetting on purpose</td><td>Summarise, decay, expire, supersede. A legal delete erases every copy: row, vector, cache and summary.</td></tr>
+  <tr><td>Memory frameworks</td><td>Session store for one chat, Mem0 for fast per-user memory, Zep for audited facts, LangMem on LangGraph, Letta for long-running agents.</td></tr>
+  <tr><td>State and checkpointing</td><td>Save task state under a <code>thread_id</code> in Postgres or Redis, so crashes and approvals resume.</td></tr>
+  <tr><td>What context engineering is</td><td>Each turn, decide what earns a place: write, select, compress, isolate.</td></tr>
+  <tr><td>Context budget and lost in the middle</td><td>Give each section a token budget. Put the best content at the top and repeat the question at the end.</td></tr>
+  <tr><td>Compaction and pruning</td><td>Clear used tool outputs first. Summarise history only past a threshold.</td></tr>
+  <tr><td>Context isolation</td><td>Send messy side tasks to sub-agents with clean contexts. They return a short summary.</td></tr>
+  <tr><td>System prompt, AGENTS.md, RAG as a tool</td><td>Keep the system prompt short and stable. Treat retrieved text as untrusted. Search only when needed.</td></tr>
+</table>
+
+<h4>5. MCP, A2A and protocols</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>Model Context Protocol</td><td>One standard plug, so integrations drop from M×N to M+N. Skip it for one private function.</td></tr>
+  <tr><td>Inside MCP</td><td>Host, client, server. Tools, resources, prompts. stdio locally, Streamable HTTP remotely with OAuth 2.1.</td></tr>
+  <tr><td>Building an MCP server</td><td>FastMCP turns typed Python functions into tools. The docstring is the description. One narrow job per tool.</td></tr>
+  <tr><td>The MCP client</td><td>The server owns tools, the client owns the loop: connect, list tools, call, feed back. Allow-list servers.</td></tr>
+  <tr><td>A2A</td><td>Hands a whole task to another agent. If the other side thinks, use A2A. If it only executes, use MCP.</td></tr>
+  <tr><td>ACP, AG-UI, AP2</td><td>ACP merged into A2A. AG-UI streams progress to the screen. AP2 proves a human approved a payment.</td></tr>
+  <tr><td>The stack view</td><td>MCP reaches tools, A2A reaches agents, memory spans time, context engineering picks what the model sees.</td></tr>
+</table>
+
+<h4>6. Architectures and multi-agent patterns</h4>
+<table>
+  <tr><th>Topic</th><th>The one thing to remember</th></tr>
+  <tr><td>Single-agent loop with guards</td><td>A bounded <code>for</code> loop, never <code>while True</code>. Caps on steps, seconds and tokens.</td></tr>
+  <tr><td>When one agent is plenty</td><td>Start with one agent and good tools. Split only on a measured failure.</td></tr>
+  <tr><td>Prompt chaining</td><td>Fixed steps in order, with a code check between steps to stop bad data early.</td></tr>
+  <tr><td>Routing and handoffs</td><td>A cheap classifier picks the specialist. Send unclear high-stakes cases to the careful lane.</td></tr>
+  <tr><td>Delegation vs handoff</td><td>Delegation calls a specialist like a tool and control returns. A handoff passes control for good.</td></tr>
+  <tr><td>Parallel agents</td><td>Sectioning splits different work. Voting repeats the same task. Never vote on facts.</td></tr>
+  <tr><td>Orchestrator-worker</td><td>A lead splits the goal at run time, workers run in clean contexts. About 15 times the cost of a chat.</td></tr>
+  <tr><td>Planner-Generator-Evaluator</td><td>One role drafts, another grades against a rubric. Cap at about 3 rounds.</td></tr>
+  <tr><td>Hierarchies and DAGs</td><td>Keep trees two or three levels deep. A graph with no cycles always finishes.</td></tr>
+  <tr><td>Debate and group chat</td><td>Opposing agents argue, a judge decides. Only for contested, high-stakes judgment.</td></tr>
+  <tr><td>The multi-agent trade-off</td><td>Chat 1×, single agent about 4×, multi-agent about 15× the tokens. Ship it only if the measured gain is real.</td></tr>
+  <tr><td>Human-in-the-loop</td><td>Gate risky actions, save a checkpoint, wait, resume. Side effects before the pause run twice.</td></tr>
+  <tr><td>Choosing an architecture</td><td>Single agent, then chain or router, parallel, orchestrator, debate. Climb one rung per measured failure.</td></tr>
+  <tr><td>Deep research, browser and computer use</td><td>Growing autonomy and risk. Read-only, sandboxed, human approval where money or data is involved.</td></tr>
+  <tr><td>Hierarchical agent teams</td><td>Nest supervisors only past 5 to 10 specialists. A compiled team is just a node.</td></tr>
+</table>
+
+<h4>The non-negotiables</h4>
+<ul>
+  <li><strong>Cap every loop</strong> on steps, seconds and tokens. A missing cap is the top cause of runaway bills.</li>
+  <li><strong>The model asks, your code decides.</strong> Validate every tool call on the server: name, arguments, ownership, limits.</li>
+  <li><strong>Money moves are sequential, idempotent and gated.</strong> A blind retry of a timed-out transfer can send it twice.</li>
+  <li><strong>Return errors to the model as data.</strong> A silent empty result makes the model invent an answer.</li>
+  <li><strong>Scope memory and recall to the signed-in user</strong>, and delete every derived copy on request.</li>
+  <li><strong>Treat tool output, web pages and other agents' text as untrusted.</strong> It can carry prompt injection.</li>
+  <li><strong>Start with the least agentic design.</strong> Add agents, patterns and protocols only for a measured failure.</li>
+</ul>
+
+<div class="key">
+  <div class="lbl">💡 If you remember five things</div>
+  <p>(1) Use a <strong>workflow</strong> when you can draw the steps. (2) An agent is a <strong>bounded loop</strong> with caps. (3) Tool quality is mostly <strong>schemas, descriptions and server-side checks</strong>. (4) <strong>Context is a budget</strong>: curate it every turn. (5) <strong>One guarded agent first</strong>; multi-agent costs about 15 times as much.</p>
+</div>
+
+<div class="qa">
+  <div class="q">Q. "Explain how you would build a banking agent, end to end, in two minutes."</div>
+  <div class="a">A. Start with a fixed workflow for auth, limits and logging, and allow one agentic step. Inside, a ReAct loop with caps calls tightly typed tools, sorted by risk tier. Reads run in parallel. Writes run in order, with idempotency keys and a human gate above a threshold. Memory is scoped per user. State is checkpointed so approvals can pause and resume. <strong>Strong answer adds:</strong> I would expose shared tools over MCP, and split into multiple agents only when tool count, context size or a needed second opinion proves one agent is not enough.</div>
+</div>
+
+<div class="remember">
+  <div class="lbl">🧠 Remember it</div>
+  <p>Least agency, bounded loop, typed tools, checked on the server, curated context, gated money, one agent first.</p>
+</div>
+
+<p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🧭 recap</span></p>
+</section>
+
+
+<section class="topic">
+<h3>Agent production choices: options, defaults, and when to switch</h3>
+<p class="lede">One table for every agent design decision: the options, what to pick for production, and when another option wins.</p>
+
+<p>Read each row left to right. Start with the default. Switch only when you measure the problem in the last column.</p>
+
+<table>
+  <tr><th>Decision</th><th>Options</th><th>Production default (why)</th><th>Pick another when</th></tr>
+  <tr><td><strong>How much agency</strong></td><td>fixed workflow, autocomplete, copilot, autonomous agent</td><td>Fixed outer workflow with one small agentic step (repeatable, auditable)</td><td>Full agent only if the path is unpredictable and risk is bounded or human-gated</td></tr>
+  <tr><td><strong>Who runs the loop</strong></td><td>hand-written loop, OpenAI Agents SDK, LangChain <code>create_agent</code>, LangGraph</td><td>A maintained framework (retries, tracing, stop rules built in)</td><td>Hand-roll for custom budgets or approval gates; LangGraph for durable state and HITL</td></tr>
+  <tr><td><strong>Loop guards</strong></td><td>step cap, token budget, wall-clock timeout</td><td>All three on every loop</td><td>Never drop one; tune per task</td></tr>
+  <tr><td><strong>Model tier</strong></td><td>strong model, cheap model</td><td>Cheap for routing, extraction and workers; strong for planning and customer drafts</td><td>Strong everywhere only if evals show the cheap one failing</td></tr>
+  <tr><td><strong>Tool API style</strong></td><td>native function calling, JSON in text, Responses API, Chat Completions</td><td>Native function calling; Responses API for new OpenAI projects</td><td>Chat Completions for existing code; never parse JSON from free text</td></tr>
+  <tr><td><strong><code>tool_choice</code></strong></td><td>auto, required, none, one named tool</td><td><code>auto</code></td><td>Force a tool when intent is certain (a button); <code>none</code> on general-question routes</td></tr>
+  <tr><td><strong>Schema strictness</strong></td><td>loose, strict (enums, bounds, patterns)</td><td>Strict, plus server-side checks</td><td>Loose for free text such as a dispute description</td></tr>
+  <tr><td><strong>Tool routing</strong></td><td>flat list, two-stage router, search over tools</td><td>Flat list for a handful of tools</td><td>Router past about a dozen; search over tools at hundreds</td></tr>
+  <tr><td><strong>Parallel calls</strong></td><td>parallel, sequential</td><td>Parallel for independent reads, with a concurrency cap</td><td>Sequential for any write or dependent step</td></tr>
+  <tr><td><strong>Retries</strong></td><td>retry, surface error, backoff, idempotency key, circuit breaker</td><td>Retry transient errors with backoff and jitter; one breaker per tool</td><td>Surface terminal errors (400, 401, 403, 404) and writes without an idempotency key</td></tr>
+  <tr><td><strong>Action safety</strong></td><td>read, knowledge, action tiers</td><td>Action tools: idempotency, step-up identity, limits, approval, audit</td><td>External services (Serper, SendGrid) only when no internal service exists</td></tr>
+  <tr><td><strong>Function tool vs computer use</strong></td><td>function tool, browser agent, computer use</td><td>Function tool (10 to 100 times cheaper and faster)</td><td>Computer use only with no API, sandboxed, human approval on irreversible steps</td></tr>
+  <tr><td><strong>JSON tools vs CodeAct</strong></td><td>JSON tool calls, model-written code</td><td>JSON tool calls (easy to validate and audit)</td><td>CodeAct for loops and math across many calls, in E2B, Modal or Pyodide</td></tr>
+  <tr><td><strong>Reasoning style</strong></td><td>one-shot, CoT, reasoning model, self-consistency, Tree of Thoughts</td><td>Route: one-shot for simple turns, CoT or a reasoning model for multi-step</td><td>Self-consistency when errors are costly; Tree of Thoughts only for rare high-stakes search</td></tr>
+  <tr><td><strong>Loop shape</strong></td><td>ReAct, Plan-and-Execute</td><td>ReAct (grounded in live data)</td><td>Plan-and-Execute for long, predictable, high-volume flows</td></tr>
+  <tr><td><strong>Self-check</strong></td><td>none, same-model critic, grounded critic, external verifier</td><td>Grounded critic, capped at 3 retries</td><td>External verifier or another model family when blind spots matter; skip for trivial replies</td></tr>
+  <tr><td><strong>Task graph</strong></td><td>hard-coded DAG, planner-made DAG</td><td>Hard-coded for fixed flows</td><td>Planner model for open-ended goals</td></tr>
+  <tr><td><strong>Memory type</strong></td><td>episodic, semantic, procedural</td><td>Match the fact: event, durable fact, shared how-to</td><td>Time-boxed facts go to episodic with an expiry</td></tr>
+  <tr><td><strong>Memory framework</strong></td><td>session store, Mem0, Zep, LangMem, Letta, plain DB fields</td><td>Session store for one chat; Mem0 for per-user memory</td><td>Zep for audited changing facts; LangMem on LangGraph; DB fields when a few values do</td></tr>
+  <tr><td><strong>Memory writes</strong></td><td>hot path, background</td><td>Background extraction (no added latency)</td><td>Hot path when the next turn needs the fact</td></tr>
+  <tr><td><strong>Checkpointer</strong></td><td>in-memory, Postgres, Redis, SQLite</td><td>Postgres or Redis with a <code>thread_id</code></td><td>In-memory only for demos</td></tr>
+  <tr><td><strong>Clearing the window</strong></td><td>prune tool results, compact history</td><td>Prune first, compact past a threshold</td><td>Neither for short chats</td></tr>
+  <tr><td><strong>Context isolation</strong></td><td>one agent, sub-agents</td><td>One agent</td><td>Sub-agents for self-contained, token-heavy, parallel side tasks</td></tr>
+  <tr><td><strong>Knowledge access</strong></td><td>always retrieve, RAG as a tool</td><td>RAG as a tool, "cite or refuse" on policy answers</td><td>Pre-search on obvious FAQ paths to save a hop</td></tr>
+  <tr><td><strong>Tool integration</strong></td><td>in-process function, MCP</td><td>MCP when more than one app needs the tool</td><td>Plain function for one app and one private function</td></tr>
+  <tr><td><strong>MCP transport and auth</strong></td><td>stdio, Streamable HTTP, OAuth 2.1</td><td>stdio locally; Streamable HTTP with OAuth 2.1 remotely</td><td>Never the old HTTP+SSE transport</td></tr>
+  <tr><td><strong>Agent to agent</strong></td><td>A2A, MCP</td><td>A2A when the peer reasons on its own</td><td>MCP when the peer only executes</td></tr>
+  <tr><td><strong>UI and payments</strong></td><td>AG-UI, AP2, hand-rolled</td><td>AG-UI for live progress; AP2 for agent payments</td><td>Never hand-roll payment authorization</td></tr>
+  <tr><td><strong>Single vs multi-agent</strong></td><td>one agent, many agents</td><td>One guarded agent (about 4× chat cost vs about 15×)</td><td>15 to 20+ tools, a drowning context, real parallelism, or a needed second opinion</td></tr>
+  <tr><td><strong>Fixed vs dynamic path</strong></td><td>prompt chain, agent</td><td>Chain with code checks between steps</td><td>Agent or orchestrator when the path changes per request</td></tr>
+  <tr><td><strong>Who handles the request</strong></td><td>router, handoff, delegation, swarm</td><td>Cheap router with a fallback lane</td><td>Handoff when the specialist owns the chat; delegation when the lead merges answers</td></tr>
+  <tr><td><strong>Parallel agents</strong></td><td>sectioning, voting, orchestrator-worker</td><td>Sectioning for known independent work</td><td>Voting for borderline judgment; orchestrator for open-ended high-value work</td></tr>
+  <tr><td><strong>Quality loop</strong></td><td>none, evaluator-optimizer, debate</td><td>None for low-stakes answers</td><td>Evaluator loop (3 rounds) when "good" is checkable; debate for contested judgment</td></tr>
+  <tr><td><strong>Hierarchy depth</strong></td><td>flat supervisor, two levels, three levels</td><td>Flat supervisor</td><td>Nest past 5 to 10 specialists or separate team ownership; three levels rarely</td></tr>
+  <tr><td><strong>Human approval</strong></td><td>gate everything, risk-tiered, none</td><td>Risk-tiered gates; fail safe on timeout</td><td>Auto-approve small read-only actions to avoid approval fatigue</td></tr>
+</table>
+
+<div class="warn">
+  <div class="lbl">⚠ Watch out</div>
+  <p>Every move to the right in this table adds tokens, latency and a new way to fail. Ship the defaults, run your eval set, and change one row at a time.</p>
+</div>
+
+<div class="qa">
+  <div class="q">Q. "A colleague wants five agents for a balance-and-transactions bot. What do you say?"</div>
+  <div class="a">A. One guarded agent with a few read tools covers it, at about a quarter of the multi-agent cost. Add a router only past a dozen tools, and more agents only for a measured failure. <strong>Strong answer adds:</strong> track tool mis-selection, containment and cost per resolved request, so the next split is driven by data.</div>
+</div>
+
+<div class="remember">
+  <div class="lbl">🧠 Remember it</div>
+  <p>Default first, measure second, switch one row at a time.</p>
+</div>
+
+<p class="chips"><span class="chip">🎯 interview</span> <span class="chip">🏭 production</span> <span class="chip">🧭 cheat-sheet</span></p>
+</section>
 <h2 class="part">Frameworks — LangChain, LangGraph &amp; more</h2>
 <p class="part-intro">A friendly, hands-on tour of the toolkits teams reach for when building AI apps — what each one is really for, the current (2026) way to use it, and the honest answer to "do I even need one?" — all told through our running bank, <strong>NorthBank</strong>.</p>
 
@@ -21926,7 +22993,7 @@ result = investigator.invoke(                             <span class="cmt"># sa
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood — three middleware, always on</div>
-  <p><code>create_deep_agent</code> is really <code>create_agent</code> with three middleware baked in: <strong>TodoListMiddleware</strong> (a <code>write_todos</code> tool so the agent plans and tracks pending/in-progress/done steps), <strong>FilesystemMiddleware</strong> (virtual <code>ls</code>/<code>read_file</code>/<code>write_file</code>/<code>edit_file</code>/<code>glob</code>/<code>grep</code> tools — a scratchpad to <em>offload</em> context instead of stuffing the window), and <strong>SubAgentMiddleware</strong> (a <code>task</code> tool that hands a sub-job to a subagent with its <em>own</em> clean context, then returns just the answer). It's the open-source cousin of how coding agents like Claude Code stay coherent over long jobs. The filesystem is pluggable — back it with real storage in production.</p>
+  <p><code>create_deep_agent</code> is really <code>create_agent</code> with three middleware baked in: <strong>TodoListMiddleware</strong> (a <code>write_todos</code> tool so the agent plans and tracks pending/in-progress/done steps), <strong>FilesystemMiddleware</strong> (virtual <code>ls</code>/<code>read_file</code>/<code>write_file</code>/<code>edit_file</code>/<code>glob</code>/<code>grep</code> tools — a scratchpad to <em>offload</em> context instead of stuffing the window), and <strong>SubAgentMiddleware</strong> (a <code>task</code> tool that hands a sub-job to a subagent with its <em>own</em> clean context, then returns just the answer). It's the open-source cousin of how coding agents like Claude Code stay coherent over long jobs. The filesystem is pluggable — back it with real storage in production. (Version note: in recent <code>deepagents</code> releases the planning <code>TodoListMiddleware</code> is opt-in rather than always-on — pass <code>middleware=[TodoListMiddleware()]</code> if <code>write_todos</code> isn't enabled by default in your version.)</p>
 </div>
 
 <h5>In production</h5>
@@ -22320,7 +23387,7 @@ print(graph.invoke(Command(resume="approved"), cfg))    <span class="cmt"># resu
 </div>
 
 <h5>In production</h5>
-<p>Durable execution is the selling point: because state is checkpointed after every node, a crashed run resumes from its last good step instead of starting over — gold for a multi-minute compliance workflow. Watch three things at scale. <strong>Checkpoint growth:</strong> long chats pile up snapshots; set retention/pruning. <strong>Thread hygiene:</strong> keep <code>thread_id</code> values short and unique per conversation. <strong>Deployment:</strong> the managed server (now <strong>LangSmith Agent Server</strong> — it was "LangGraph Platform", then "LangSmith Deployment", so expect all three names in the wild) handles persistence and exposes REST endpoints for runs and threads, with LangGraph Studio for visual debugging.</p>
+<p>Durable execution is the selling point: because state is checkpointed after every node, a crashed run resumes from its last good step instead of starting over — gold for a multi-minute compliance workflow. Watch three things at scale. <strong>Checkpoint growth:</strong> long chats pile up snapshots; set retention/pruning. <strong>Thread hygiene:</strong> keep <code>thread_id</code> values short and unique per conversation. <strong>Deployment:</strong> the managed offering is <strong>LangSmith Deployment</strong>, its runtime is the <strong>LangSmith Agent Server</strong>, and the visual debugger is <strong>LangSmith Studio</strong> (all renamed from the old "LangGraph Platform" / "LangGraph Studio", so older docs and URLs still use those). The server handles persistence and exposes REST endpoints for runs and threads.</p>
 
 <div class="warn">
   <div class="lbl">⚠ Watch out</div>
@@ -22752,7 +23819,7 @@ def run_fraud_checks(state):
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood — modes vs the event stream</div>
-  <p><code>stream_mode</code> is the everyday API. Under it sits a finer-grained event stream that emits a typed event for <em>every</em> step — model start/stream/end, tool start/end, chain boundaries — each tagged with the node and any tags you set. For new apps the docs now point to <code>stream_events(..., version="v3")</code>, which returns separate projections (messages, values, subgraphs, interrupts); the older <code>astream_events</code> (with <code>version="v2"</code>) still works but is no longer the recommended entry point. Reach for the event stream when you need deep per-event hooks, like a custom trace exporter; reach for <code>stream_mode</code> for normal UI streaming. You can also mark a node or model <em>not</em> to stream its tokens when you don't want internal chatter leaking to the user.</p>
+  <p><code>stream_mode</code> is the everyday API. Under it sits a finer-grained event stream that emits a typed event for <em>every</em> step — model start/stream/end, tool start/end, chain boundaries — each tagged with the node and any tags you set. <code>astream_events(..., version="v2")</code> (and <code>stream_events</code>) is the current, stable, recommended version. A newer <code>version="v3"</code> exists (added in LangGraph 1.2) and is content-block-centric with separate projections, but it's still <strong>beta/opt-in</strong> and subject to change, so stick with v2 for production and try v3 only when you want the newer shape. Reach for the event stream when you need deep per-event hooks, like a custom trace exporter; reach for <code>stream_mode</code> for normal UI streaming. You can also mark a node or model <em>not</em> to stream its tokens when you don't want internal chatter leaking to the user.</p>
 </div>
 
 <h5>In production</h5>
@@ -22963,7 +24030,7 @@ print(hits[0].value["text"])                                  <span class="cmt">
 <p class="lvl lvl-4">④ Pro</p>
 <p class="lede">Deploying a graph means three things: a <code>langgraph.json</code> that describes your app, <strong>Assistants</strong> that version its <em>config</em> apart from its code, and a hosting choice that decides which country your customers' data sits in.</p>
 
-<p>A graph that runs on your laptop is one thing; a graph a regulated bank runs in production is another. You need to declare what to deploy, ship per-customer or per-environment variations without forking the code, call the deployed graph from elsewhere, and — the question a bank asks <em>first</em> — guarantee that customer data never leaves an approved region. LangGraph's deployment surface (the managed server was renamed <strong>LangSmith Deployment</strong> in late 2025) answers each.</p>
+<p>A graph that runs on your laptop is one thing; a graph a regulated bank runs in production is another. You need to declare what to deploy, ship per-customer or per-environment variations without forking the code, call the deployed graph from elsewhere, and — the question a bank asks <em>first</em> — guarantee that customer data never leaves an approved region. LangGraph's deployment surface (the managed offering <strong>LangSmith Deployment</strong>, renamed from "LangGraph Platform" in late 2025) answers each.</p>
 
 <h5>langgraph.json — the deployment manifest</h5>
 <p>A small file tells the server what your app is: its dependencies, which graphs to expose (and where to find them), and the env file.</p>
@@ -23060,7 +24127,7 @@ fraud.invoke({"txns": [...]})                              <span class="cmt"># s
 
 <div class="warn">
   <div class="lbl">⚠ Watch out</div>
-  <p>The names keep moving: the managed server is <strong>LangSmith Agent Server</strong> now — it was "LangGraph Platform", then "LangSmith Deployment", so older docs and URLs still say all three. Assistants live in the deployment, not the open-source library. And don't point a <code>RemoteGraph</code> at its <em>own</em> deployment — a graph calling itself through RemoteGraph can deadlock; use a local subgraph for same-deployment composition.</p>
+  <p>The names moved in 2025: the managed offering is <strong>LangSmith Deployment</strong>, its runtime the <strong>LangSmith Agent Server</strong>, and the visual debugger <strong>LangSmith Studio</strong> — all renamed from the old "LangGraph Platform" / "LangGraph Studio", so older docs and URLs still use those. Assistants live in the deployment, not the open-source library. And don't point a <code>RemoteGraph</code> at its <em>own</em> deployment — a graph calling itself through RemoteGraph can deadlock; use a local subgraph for same-deployment composition.</p>
 </div>
 
 <h5>When to use it — and when not</h5>
@@ -23211,7 +24278,7 @@ graph.invoke(None, forked)                                     <span class="cmt"
         cfg, stream_mode=["updates", "messages"]):             <span class="cmt"># updates = per-node diffs; messages = token stream</span>
     print(mode, chunk)                                         <span class="cmt"># mode tells you which kind each yield is</span></code></pre>
 
-<p>To develop with a visual debugger, add a <code>langgraph.json</code> that points at your graph and run <code>langgraph dev</code>; it starts a local server and opens LangGraph Studio, where you can watch the loop, see every checkpoint, and trigger the interrupt by hand.</p>
+<p>To develop with a visual debugger, add a <code>langgraph.json</code> that points at your graph and run <code>langgraph dev</code>; it starts a local server and opens LangSmith Studio (formerly LangGraph Studio), where you can watch the loop, see every checkpoint, and trigger the interrupt by hand.</p>
 
 <div class="tipbox">
   <div class="lbl">✅ Tip — checkpointer completeness &amp; thread hygiene</div>
@@ -23263,6 +24330,38 @@ print(engine.query("What is the overdraft fee, and can it be waived?"))</code></
 <div class="out"><div class="lbl">▶ Output</div>The overdraft item fee is $35. One courtesy waiver is available per 12-month period on request.</div>
 
 <p>A <strong>query engine</strong> is a retriever (finds the relevant chunks) plus a response synthesizer (writes the answer) in one object. Want just the raw chunks instead? Use <code>index.as_retriever()</code>. Want conversation memory? Use a chat engine.</p>
+
+<h4>Ingestion in production: the IngestionPipeline</h4>
+<p><code>VectorStoreIndex.from_documents(docs)</code> hides the real ingest path. In production you build it explicitly as an <strong>IngestionPipeline</strong>: an ordered list of <em>transformations</em> (split, then embed), a caching layer so re-runs don't re-embed unchanged text, and a <em>docstore</em> that dedups and <strong>upserts</strong> — so a nightly re-ingest only processes what changed.</p>
+<pre><code>from llama_index.core.ingestion import IngestionPipeline
+from llama_index.core.node_parser import SentenceSplitter   <span class="cmt"># the chunker</span>
+from llama_index.embeddings.openai import OpenAIEmbedding    <span class="cmt"># the embedder</span>
+from llama_index.core.storage.docstore import SimpleDocumentStore
+
+pipeline = IngestionPipeline(                      <span class="cmt"># the real, controllable ingest path</span>
+    transformations=[
+        SentenceSplitter(chunk_size=512),          <span class="cmt"># 1. split documents into chunks</span>
+        OpenAIEmbedding()],                        <span class="cmt"># 2. embed each chunk</span>
+    docstore=SimpleDocumentStore())                <span class="cmt"># dedup + upsert: skip unchanged docs</span>
+
+nodes = pipeline.run(documents=docs)               <span class="cmt"># cached — a re-run only does new/changed docs</span>
+index = VectorStoreIndex(nodes)                    <span class="cmt"># build the index from the processed nodes</span></code></pre>
+<p>This is the production answer to "how do I re-index 400,000 policy pages every night without re-embedding all of them" — the docstore hash-checks each document and the cache skips the work. Point the pipeline at a real vector store (<code>llama-index-vector-stores-qdrant</code>, pgvector, etc.) and it writes straight there.</p>
+
+<h4>Memory and structured extraction</h4>
+<p>Two more production pieces. <strong>Memory</strong> is now a composable <code>Memory</code> object (short-term chat history plus pluggable long-term <em>blocks</em>: a static block, a fact-extraction block, a vector block) you pass to an agent so it remembers across turns. <strong>Structured extraction</strong> forces typed output: wrap the model with <code>as_structured_llm(MyModel)</code> (or call <code>structured_predict</code>) to get a validated Pydantic object instead of prose — and the managed <strong>LlamaExtract</strong> service does the same schema-driven extraction over messy documents (KYC forms, statements) at scale.</p>
+<pre><code>from llama_index.core.memory import Memory
+from pydantic import BaseModel
+
+memory = Memory.from_defaults(session_id="cust-42", token_limit=40000)  <span class="cmt"># composable memory</span>
+await agent.run("Remind me what we discussed.", memory=memory)          <span class="cmt"># recalls earlier turns</span>
+
+class KYC(BaseModel):                               <span class="cmt"># the shape we want extracted</span>
+    full_name: str
+    date_of_birth: str
+
+sllm = Settings.llm.as_structured_llm(KYC)          <span class="cmt"># force output to this schema</span>
+kyc = sllm.complete("Name: Mara Ito, DOB 1990-04-02").raw  <span class="cmt"># a validated KYC instance</span></code></pre>
 
 <h4>Turning a query engine into a tool</h4>
 <p>The real power move: wrap a query engine as a <em>tool</em> so an agent can decide <em>when</em> to search the docs. LlamaIndex's modern agent is <code>FunctionAgent</code>, built on its Workflows engine.</p>
@@ -23371,6 +24470,27 @@ print(out["llm"]["replies"][0].text)                    <span class="cmt"># read
   <figcaption>A Haystack pipeline is an explicit graph: named components wired output-to-input, with the type on every connection checked before the pipeline ever runs.</figcaption>
 </figure>
 
+<h4>The indexing side: splitters, embedders, and document stores</h4>
+<p>The pipeline above answers questions; a <em>separate</em> pipeline gets the documents in. Indexing is its own graph: split documents into chunks, embed them, and write them to a <strong>document store</strong>. The store is <code>InMemoryDocumentStore</code> for dev, or pgvector/Qdrant/etc. via an integration package.</p>
+<pre><code>from haystack import Pipeline, Document
+from haystack.document_stores.in_memory import InMemoryDocumentStore
+from haystack.components.preprocessors import DocumentSplitter
+from haystack.components.embedders import SentenceTransformersDocumentEmbedder
+from haystack.components.writers import DocumentWriter
+
+store = InMemoryDocumentStore()                    <span class="cmt"># swap for pgvector/Qdrant in prod</span>
+index = Pipeline()                                 <span class="cmt"># a SEPARATE pipeline, just for ingestion</span>
+index.add_component("split", DocumentSplitter(split_by="word", split_length=200))
+index.add_component("embed", SentenceTransformersDocumentEmbedder())  <span class="cmt"># DOCUMENT embedder</span>
+index.add_component("write", DocumentWriter(document_store=store))
+index.connect("split", "embed")
+index.connect("embed", "write")
+index.run({"split": {"documents": [Document(content="Overdraft fee: $35...")]}})</code></pre>
+<div class="warn">
+  <div class="lbl">⚠ The classic Haystack gotcha</div>
+  <p>There are <strong>two</strong> embedders and they are not interchangeable: a <code>SentenceTransformersDocumentEmbedder</code> embeds <em>documents</em> at index time, and a <code>SentenceTransformersTextEmbedder</code> embeds the <em>query</em> string at search time. Wire a Document embedder where a Text embedder belongs (or vice versa) and the pipeline fails type-check or silently retrieves garbage. Same model, different component — match them.</p>
+</div>
+
 <h4>The Agent component</h4>
 <p>Haystack now has a first-class, <em>stable</em> <code>Agent</code> component that runs the full tool-calling loop (call model → run tools → check stop condition) and is itself embeddable inside a pipeline — the best of both worlds.</p>
 
@@ -23380,6 +24500,8 @@ from haystack.components.generators.chat import OpenAIChatGenerator
 agent = Agent(                                           <span class="cmt"># owns the tool-calling loop itself</span>
     chat_generator=OpenAIChatGenerator(model="gpt-4.1"),
     tools=[...])                                        <span class="cmt"># Tool / ComponentTool / MCPTool</span></code></pre>
+
+<p>The Agent has two production features worth knowing. <strong>Agent Hooks</strong> (a <code>before_tool</code>/<code>after_tool</code> system) let you inspect, log, or veto each tool call — human-in-the-loop approval is now a <code>before_tool</code> hook that pauses for sign-off before a sensitive tool runs. And the Agent emits an <strong><code>exit_reason</code></strong> output (why the loop stopped) that a <code>ConditionalRouter</code> downstream can branch on, so the agent slots cleanly into a larger pipeline.</p>
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood</div>
@@ -23455,6 +24577,54 @@ print(result.final_output)                             <span class="cmt"># answe
 <div class="card">
   <div class="lbl">⚙️ Under the hood</div>
   <p>The Agents SDK is a <strong>thin runtime</strong> over the model API: for OpenAI models it uses Responses by default, wrapping it to manage turns, tool dispatch, guardrails, handoffs, and sessions. It's also <strong>provider-agnostic</strong> — it can run on Chat Completions and even non-OpenAI models. Responses itself offers hosted tools you don't have to build: <strong>web search, file search, code interpreter, image generation, computer use, and remote MCP servers</strong>, several callable in a single request.</p>
+</div>
+
+<h4>Function tools, structured output, and sessions</h4>
+<p>Handoffs and guardrails are only part of the kit. Three more pieces turn the triage demo into a real agent: a decorator that makes any Python function a tool, a typed result, and automatic memory.</p>
+<pre><code>from agents import Agent, Runner, function_tool, SQLiteSession
+from pydantic import BaseModel
+
+@function_tool                                   <span class="cmt"># expose a Python function as a tool (schema from hints)</span>
+def get_balance(account_id: str) -&gt; str:
+    """Look up an account balance."""
+    return "A-77: $1,240.50"
+
+class Dispute(BaseModel):                         <span class="cmt"># the typed shape we want back</span>
+    charge_id: str
+    reason: str
+
+agent = Agent(
+    name="Support",
+    instructions="Help the customer; capture any dispute as structured data.",
+    tools=[get_balance],
+    output_type=Dispute)                          <span class="cmt"># STRUCTURED OUTPUT: validated to this model</span>
+
+session = SQLiteSession("cust-42")                <span class="cmt"># automatic conversation memory, keyed by id</span>
+result = Runner.run_sync(agent,                   <span class="cmt"># history is loaded + saved for you</span>
+    "Dispute charge C-900, I never made it.", session=session)
+print(result.final_output)                        <span class="cmt"># a Dispute instance, not free text</span></code></pre>
+<div class="out"><div class="lbl">▶ Output</div>Dispute(charge_id='C-900', reason='Customer did not make the charge')</div>
+
+<p><strong>Sessions</strong> come in several backends for the same tiny protocol (<code>get_items</code>/<code>add_items</code>/<code>pop_item</code>/<code>clear_session</code>): <code>SQLiteSession</code> (local, the default), <code>OpenAIConversationsSession</code> (server-side via the Conversations API), plus <code>RedisSession</code>, <code>SQLAlchemySession</code>, and <code>EncryptedSession</code> for a bank that must encrypt stored history. Pick the backend; the agent code doesn't change.</p>
+
+<h4>Streaming and agents-as-tools</h4>
+<p>For a live UI, swap <code>run_sync</code> for <code>Runner.run_streamed</code> and consume events as they arrive. And to <em>delegate</em> (call a specialist and get the result back, rather than hand the conversation away), wrap an agent as a tool with <code>.as_tool</code>:</p>
+<pre><code>result = Runner.run_streamed(agent, "What's my balance on A-77?")  <span class="cmt"># async streaming run</span>
+async for event in result.stream_events():        <span class="cmt"># tokens + tool events as they happen</span>
+    if event.type == "raw_response_event":
+        print(event.data, end="")                 <span class="cmt"># push each token to the screen</span>
+
+fx = Agent(name="FX", instructions="Convert currencies precisely.")
+manager = Agent(name="Manager",
+    instructions="Answer the customer; use convert_fx for any conversion.",
+    tools=[fx.as_tool(                            <span class="cmt"># DELEGATE: manager calls FX and gets the answer back</span>
+        tool_name="convert_fx",
+        tool_description="Convert an amount between currencies.")])</code></pre>
+<p>That is the difference from a handoff in one line: <code>handoffs=[fx]</code> <em>transfers</em> the conversation to FX; <code>fx.as_tool(...)</code> keeps the manager in charge and just borrows FX's answer (the delegate-vs-handoff split from the architectures chapter).</p>
+
+<div class="card">
+  <div class="lbl">⚙️ Model settings &amp; human-in-the-loop</div>
+  <p>Tune the loop with <code>ModelSettings(temperature=, tool_choice=, parallel_tool_calls=)</code> passed to the agent. For approvals, a run can pause: the result carries <code>interruptions</code> (pending tool approvals) and a <code>RunState</code> you resume after a human says yes — the SDK also integrates with durable engines (Temporal, DBOS, Dapr, Restate) for long-running agents. The SDK can also attach MCP servers directly with <code>Agent(mcp_servers=[...])</code>, and ships <code>RealtimeAgent</code>/<code>VoicePipeline</code> for voice.</p>
 </div>
 
 <h4>In production</h4>
@@ -23782,8 +24952,21 @@ class OnboardingFlow(Flow):                              <span class="cmt"># a F
 <h4>Going deeper — where CrewAI shines, with the numbers</h4>
 <p>CrewAI's edge is the <em>mental model</em>: "a loan desk is an analyst, an underwriter, and a letter-writer" maps to code a domain expert can read, which makes it a fast way to prototype a multi-role workflow and hand it over for review. Where it costs you: a hierarchical crew's manager agent fires an extra model call on <em>every</em> delegation, so a three-specialist review can quietly become five or six billed calls — budget for it, and prefer a sequential process (or Flows) when you don't actually need a planner. Against the alternatives, the honest placement is: CrewAI gives a friendlier multi-agent story than raw LangGraph but less precise control over state and branching; it gives richer role-collaboration than Pydantic AI but far less typed-output rigour. The 2026 production answer is the <em>combination</em> — Flows as the deterministic, auditable backbone (NorthBank onboarding must <em>always</em> KYC before it opens an account), with Crews reserved for the sub-steps where open-ended reasoning genuinely earns its cost.</p>
 
+<h4>Memory, knowledge, and training</h4>
+<p>Three features turn a crew from a one-shot script into something that remembers, grounds itself, and improves. <strong>Memory</strong> lets agents recall earlier context across tasks — modern CrewAI exposes it as a single unified <code>Memory</code> (with <code>remember()</code>, <code>recall()</code>, <code>extract_memories()</code>, <code>forget()</code>, <code>reset()</code>), replacing the old short-term/long-term/entity split; you switch it on with <code>memory=True</code> on the Crew. <strong>Knowledge</strong> attaches sources (files, PDFs, or strings) the agents can retrieve from — RAG built into the crew. <strong>Training</strong> (<code>crew.train()</code>) replays tasks with human feedback and bakes the lessons in, so outputs get more consistent run to run.</p>
+
+<pre><code>crew = Crew(
+    agents=[analyst, writer],
+    tasks=[analyse, draft],
+    memory=True,                      <span class="cmt"># ON: agents recall context across tasks (unified Memory)</span>
+    knowledge_sources=[fee_policy])   <span class="cmt"># files/strings the agents can retrieve from (built-in RAG)</span>
+
+crew.kickoff(inputs={"case": "C-900"})
+crew.train(n_iterations=3,           <span class="cmt"># replay with human feedback → steadier outputs</span>
+    filename="trained.pkl")</code></pre>
+
 <h4>In production</h4>
-<p>Flows support <strong>persistence</strong> (<code>@persist</code>, SQLite-backed by default) so a long onboarding can resume, and <strong>human-in-the-loop</strong> via the <code>@human_feedback</code> decorator. For observability there's an event bus (AgentOps, Langtrace, OpenLIT integrations) and streaming results. The commercial platform <strong>CrewAI AMP</strong> (formerly "Enterprise") handles deploy, monitor, and RBAC (role-based access control — who is allowed to do what).</p>
+<p>Flows support <strong>persistence</strong> (<code>@persist</code>, SQLite-backed by default) so a long onboarding can resume, and <strong>human-in-the-loop</strong> via the <code>@human_feedback</code> decorator. For observability there's an event bus (AgentOps, Langtrace, OpenLIT integrations) and streaming results. The commercial platform <strong>CrewAI AMP</strong> (formerly "Enterprise") handles deploy, monitor, and RBAC (role-based access control — who is allowed to do what). CrewAI is a fast-moving <code>1.x</code> line (well past the 1.0 that cut its LangChain dependency), so pin the version.</p>
 
 <div class="warn">
   <div class="lbl">⚠ Watch out</div>
@@ -23887,7 +25070,7 @@ result = await team.run(task="Summarise dispute case #4412.") <span class="cmt">
 <h4>The successor in code — Microsoft Agent Framework</h4>
 <p>The Agent Framework keeps the same mental model but cleans up the surface. You create a <code>ChatAgent</code> backed by a chat client (OpenAI shown here) and <code>run</code> it — single agents first, workflows for multi-agent orchestration:</p>
 
-<pre><code>from agent_framework import ChatAgent                      <span class="cmt"># new agent class — pip install --pre agent-framework</span>
+<pre><code>from agent_framework import ChatAgent                      <span class="cmt"># pip install agent-framework (1.0 GA since April 2026)</span>
 from agent_framework.openai import OpenAIChatClient         <span class="cmt"># an OpenAI-backed chat client</span>
 
 agent = ChatAgent(                                          <span class="cmt"># one agent = client + instructions (+ optional tools)</span>
@@ -23898,9 +25081,11 @@ agent = ChatAgent(                                          <span class="cmt"># 
 result = await agent.run("Summarise dispute case #4412.")   <span class="cmt"># still async — note the await</span>
 print(result.text)                                         <span class="cmt"># the agent's final text answer</span></code></pre>
 
+<p>For multi-agent work, the Agent Framework ships named <strong>orchestration patterns</strong> — <code>sequential</code> (a pipeline), <code>concurrent</code> (fan-out then fan-in), <code>group chat</code>, <code>handoff</code>, and <strong>Magentic</strong> (the Magentic-One manager that plans and delegates) — built on a workflow graph engine (<code>WorkflowBuilder</code>), with <code>AgentThread</code> for thread-based state and middleware hooks for cross-cutting concerns. It inherits Semantic Kernel's enterprise plumbing (plugins, OpenTelemetry) and runs natively on Azure, including the now-GA Foundry Hosted Agents.</p>
+
 <div class="warn">
   <div class="lbl">⚠ Watch out</div>
-  <p>The Agent Framework is still in <strong>preview</strong> — the <code>agent-framework</code> package needs pip's <code>--pre</code> flag, and its class and message names have shifted between builds (some releases expose <code>Agent(client=...)</code> and a <code>Message</code>/<code>Role</code> pair instead of <code>ChatAgent</code>/<code>ChatMessage</code>). Pin the exact version and match the import names to the release you install. Don't mix its imports with AutoGen's <code>autogen-agentchat</code> ones; they are separate packages.</p>
+  <p>The Agent Framework reached <strong>1.0 GA in April 2026</strong> for both Python (<code>agent-framework</code>) and .NET (<code>Microsoft.Agents.AI</code>) — stable APIs with a long-term-support commitment, so the old <code>--pre</code> flag and the "class names shift between builds" caveat are history; build on it with confidence. Just don't mix its imports with AutoGen's <code>autogen-agentchat</code> ones — they are separate packages.</p>
 </div>
 
 <h4>In production</h4>
@@ -23990,7 +25175,7 @@ pipeline = SequentialAgent(                              <span class="cmt"># run
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood — Sessions, State, Memory</div>
-  <p>ADK carefully separates three things people blur. A <strong>Session</strong> is one conversation thread (its <code>Event</code>s are the history). <strong>State</strong> is a scratchpad dict for the current session, with scope prefixes: no prefix = this session, <code>user:</code> = across that user's sessions, <code>app:</code> = across all users, <code>temp:</code> = not persisted. <strong>Memory</strong> is long-term, cross-session, searchable knowledge. A <code>Runner</code> is the event loop that drives it all.</p>
+  <p>ADK carefully separates three things people blur. A <strong>Session</strong> is one conversation thread (its <code>Event</code>s are the history). <strong>State</strong> is a scratchpad dict for the current session, with scope prefixes: no prefix = this session, <code>user:</code> = across that user's sessions, <code>app:</code> = across all users, <code>temp:</code> = not persisted. <strong>Memory</strong> is long-term, cross-session, searchable knowledge. A <code>Runner</code> is the event loop that drives it all. <strong>Callbacks</strong> are ADK's cross-cutting hooks — <code>before_agent</code>/<code>after_agent</code>, <code>before_model</code>/<code>after_model</code>, and <code>before_tool</code>/<code>after_tool</code> functions you attach to inspect, log, mutate, or veto each step (a before_tool that blocks a transfer over a limit is the classic guardrail). <code>Plugins</code> bundle such callbacks to apply the same policy across every agent.</p>
 </div>
 
 <h4>In production</h4>
@@ -24072,19 +25257,21 @@ print(result.output.urgent)                             <span class="cmt"># attr
 </figure>
 
 <h4>Going deeper — validation as a safety net, and its cost</h4>
-<p>The quiet brilliance is that <em>validation drives the loop</em>. When the model returns <code>{"amount": "four hundred"}</code>, Pydantic rejects it and Pydantic AI sends the validation error back to the model as a fresh message — "amount must be a number" — so the model corrects itself. For a bank that is a genuine safety net: a dispute record literally cannot land in your database with a string where a float belongs. The cost is the flip side — every retry is another billed model call, so a weak model that keeps flunking validation can double or triple your token spend on a single extraction. Two mitigations: use a capable model with native structured-output support (far fewer retries), and cap retries with <code>output_retries</code> so a stubborn case fails loudly instead of looping on your dime. Against the field, Pydantic AI is the cleanest pick when <em>typed output</em> is the hard part and orchestration is light; it deliberately isn't trying to be a heavyweight multi-agent runtime, which is exactly why it stays small and testable — and why FastAPI/Pydantic shops feel at home on the first import.</p>
+<p>The quiet brilliance is that <em>validation drives the loop</em>. When the model returns <code>{"amount": "four hundred"}</code>, Pydantic rejects it and Pydantic AI sends the validation error back to the model as a fresh message — "amount must be a number" — so the model corrects itself. For a bank that is a genuine safety net: a dispute record literally cannot land in your database with a string where a float belongs. The cost is the flip side — every retry is another billed model call, so a weak model that keeps flunking validation can double or triple your token spend on a single extraction. Two mitigations: use a capable model with native structured-output support (far fewer retries), and cap retries with <code>retries={'output': N}</code> (or <code>ToolOutput(max_retries=N)</code>) so a stubborn case fails loudly instead of looping on your dime. Against the field, Pydantic AI is the cleanest pick when <em>typed output</em> is the hard part and orchestration is light; it deliberately isn't trying to be a heavyweight multi-agent runtime, which is exactly why it stays small and testable — and why FastAPI/Pydantic shops feel at home on the first import.</p>
 
 <div class="card">
   <div class="lbl">⚙️ Under the hood — dependency injection</div>
   <p>Pydantic AI's signature feature is clean <strong>dependency injection</strong>. Declare <code>deps_type=MyDeps</code>, and inside tools, instructions, or validators you receive a typed <code>RunContext[MyDeps]</code> and read <code>ctx.deps</code> — the type checker enforces it. Tools are added with <code>@agent.tool</code> (gets the context) or <code>@agent.tool_plain</code> (no context); arguments and returns are validated from type hints. Reusable tool collections are <strong>toolsets</strong> (including MCP server toolsets), shareable across agents.</p>
 </div>
 
+<p>Four more pieces round out the toolkit. <strong>Dynamic prompts:</strong> decorate a function with <code>@agent.instructions</code> (or <code>@agent.system_prompt</code>) to build the prompt per run from <code>RunContext</code> — e.g. inject the current customer's tier. <strong>Output validators:</strong> <code>@agent.output_validator</code> is the actual hook behind the retry story — raise <code>ModelRetry("amount must be a number")</code> and the framework feeds that message back to the model. <strong>Streaming:</strong> <code>async with agent.run_stream(...) as result:</code> gives a <code>StreamedRunResult</code> you consume with <code>stream_text()</code> or <code>stream_output()</code> (partial, progressively-validated objects). <strong>Output modes:</strong> structured output has three selectable strategies — <code>ToolOutput</code> (default, via a tool call), <code>NativeOutput</code> (the provider's native JSON mode), and <code>PromptedOutput</code> (ask in the prompt) — pick per model capability.</p>
+
 <h4>In production</h4>
 <p>The flagship production story is <strong>Pydantic Logfire</strong> — first-party, OpenTelemetry-based observability that traces every model call, tool invocation, and retry with one line of setup. For reliability, Pydantic AI runs agents as <strong>durable workflows</strong> that survive restarts, via supported engines (Temporal, DBOS, Prefect, Restate). There's also a separate <code>pydantic-graph</code> package for state-machine control flow. One cost caution: structured output leans on the model's schema support — a weak model fails validation and triggers retries, which costs tokens.</p>
 
 <div class="warn">
   <div class="lbl">⚠ Watch out</div>
-  <p>Pydantic AI moves fast: it hit 1.0 in September 2025 and a 2.0 "capabilities/harness-first" redesign in June 2026 — don't mix v1 and v2 tutorials. Pre-0.6 code using <code>result_type</code>/<code>result.data</code> breaks. And it's async-first: calling <code>run_sync</code> inside a running event loop hits asyncio pitfalls — use <code>await agent.run(...)</code> there.</p>
+  <p>Pydantic AI moves fast: it reached <strong>1.0 in 2025</strong> and is now on the <strong>2.x</strong> line (requires Python 3.11+), with a v3 on the horizon — so pin the version and don't mix major-version tutorials. Pre-0.6 code using <code>result_type</code>/<code>result.data</code> breaks (now <code>output_type</code>/<code>result.output</code>). And it's async-first: calling <code>run_sync</code> inside a running event loop hits asyncio pitfalls — use <code>await agent.run(...)</code> there.</p>
 </div>
 
 <h4>When to use it — and when not</h4>
@@ -24092,7 +25279,7 @@ print(result.output.urgent)                             <span class="cmt"># attr
 
 <div class="qa">
   <div class="q">Q. How does Pydantic AI actually guarantee typed output, and what does that cost?</div>
-  <div class="a">A. Validation <em>drives</em> the loop: the model's JSON is validated against your schema, and a failure is fed back to the model as an error message ("amount must be a number") to retry until it fits — so a dispute literally can't land in the database with a string where a float belongs. The cost is the flip side: every retry is another billed model call. <strong>Strong answer adds:</strong> cap it with <code>output_retries</code> and use a capable model with native structured output to cut retries; and know the renames — <code>output_type</code>/<code>result.output</code>, not the dead <code>result_type</code>/<code>result.data</code> — plus clean dependency injection via <code>RunContext[Deps]</code>.</div>
+  <div class="a">A. Validation <em>drives</em> the loop: the model's JSON is validated against your schema, and a failure is fed back to the model as an error message ("amount must be a number") to retry until it fits — so a dispute literally can't land in the database with a string where a float belongs. The cost is the flip side: every retry is another billed model call. <strong>Strong answer adds:</strong> cap it with <code>retries={'output': N}</code> and use a capable model with native structured output to cut retries; and know the renames — <code>output_type</code>/<code>result.output</code>, not the dead <code>result_type</code>/<code>result.data</code> — plus clean dependency injection via <code>RunContext[Deps]</code>.</div>
 </div>
 
 <div class="remember">
@@ -24170,8 +25357,29 @@ tuned = optimizer.compile(classify, trainset=examples)  <span class="cmt"># sear
   <p>What 2024 courses called "teleprompters" are now <strong>optimizers</strong> (same job, new name). The roster runs from <code>dspy.BootstrapFewShot</code> (tiny data) to <code>dspy.MIPROv2</code> (instructions + examples, the workhorse) to the 2025 headliner <strong><code>dspy.GEPA</code></strong>. GEPA does <em>reflective prompt evolution</em>: it keeps a frontier of candidate prompts and uses an LLM to reflect, in natural language, on execution traces — and it can consume rich <em>textual</em> feedback from your metric, not just a number. With a feedback-rich metric it often beats MIPROv2. There's even <code>dspy.BootstrapFinetune</code> to optimize model <em>weights</em>, not just prompts.</p>
 </div>
 
+<h4>Composing modules, and evaluating</h4>
+<p>A single <code>Predict</code> is the "hello world." Real DSPy programs <strong>compose</strong> several modules into one by subclassing <code>dspy.Module</code>: declare the sub-steps in <code>__init__</code> and wire them in <code>forward</code>. The whole thing is then a single object the optimizer tunes <em>end to end</em> — every sub-prompt improved together.</p>
+<pre><code>class ComplaintRouter(dspy.Module):               <span class="cmt"># compose several modules into one program</span>
+    def __init__(self):
+        self.classify = dspy.ChainOfThought("complaint -&gt; category")    <span class="cmt"># step 1: reason out a category</span>
+        self.triage   = dspy.Predict("complaint, category -&gt; urgency")  <span class="cmt"># step 2: set urgency from it</span>
+
+    def forward(self, complaint):                 <span class="cmt"># the control flow between steps</span>
+        cat = self.classify(complaint=complaint).category
+        urg = self.triage(complaint=complaint, category=cat).urgency
+        return dspy.Prediction(category=cat, urgency=urg)
+
+router = ComplaintRouter()                        <span class="cmt"># a normal module — optimizable as ONE unit</span>
+tuned  = dspy.MIPROv2(metric=metric).compile(router, trainset=examples)</code></pre>
+
+<p>To measure a program, don't hand-roll a loop — use the built-in <strong><code>dspy.Evaluate</code></strong> harness with a dev set and a metric (your own, or a built-in like <code>answer_exact_match</code> / <code>SemanticF1</code>):</p>
+<pre><code>from dspy.evaluate import Evaluate, answer_exact_match
+
+evaluator = Evaluate(devset=dev_examples, metric=answer_exact_match)   <span class="cmt"># harness + a built-in metric</span>
+score = evaluator(tuned)                           <span class="cmt"># overall score on held-out data</span></code></pre>
+
 <h4>In production</h4>
-<p>DSPy 3.x ships first-class <strong>MLflow</strong> integration (tracing, autologging, saving/loading compiled programs) so an optimized pipeline is reproducible and versioned. The practical cost caution: optimization makes <em>many real</em> model calls, so cache aggressively and budget for it — it's an offline investment that pays off at inference time.</p>
+<p>DSPy 3.x ships first-class <strong>MLflow</strong> integration (tracing, autologging, saving/loading compiled programs) so an optimized pipeline is reproducible and versioned — save a compiled program with <code>program.save(...)</code> and reload it rather than re-compiling. The practical cost caution: optimization makes <em>many real</em> model calls, so cache aggressively and budget for it — it's an offline investment that pays off at inference time.</p>
 
 <div class="warn">
   <div class="lbl">⚠ Watch out</div>
@@ -35036,7 +36244,7 @@ def search(query, user, page=0):
 <h3>Design 5 — A production multi-tenant RAG knowledge platform</h3>
 <p class="lede">Design 1 sized a RAG system; this one draws the whole production platform — the services, the queues, the stores, and how one file and one question flow through a real multi-tenant SaaS.</p>
 
-<p>This is the architecture a serious "Search AI" / knowledge platform converges on once it serves many tenants from shared infrastructure. The job is the same two paths you know — <strong>ingestion</strong> (file → searchable chunks) and <strong>query</strong> (question → ranked chunks) — but now wrapped in the platform layer from the Platform &amp; Operations chapter. The design question an interviewer (or your own architecture review) is really asking: <em>how do the pieces fit, and why each one.</em></p>
+<p>This is the architecture a serious enterprise search / knowledge platform converges on once it serves many tenants from shared infrastructure. The job is the same two paths you know — <strong>ingestion</strong> (file → searchable chunks) and <strong>query</strong> (question → ranked chunks) — but now wrapped in the platform layer from the Platform &amp; Operations chapter. The design question an interviewer (or your own architecture review) is really asking: <em>how do the pieces fit, and why each one.</em></p>
 
 <h4>Requirements shape the whole thing</h4>
 <ul>
@@ -35079,7 +36287,7 @@ def search(query, user, page=0):
       <text x="405" y="177" fill="var(--muted)" font-size="10.5" font-weight="500">Neo4j graph · S3 files</text>
       <text x="405" y="194" fill="var(--muted)" font-size="10.5" font-weight="500">Redis queues+cache</text>
 
-      <rect x="540" y="20" width="128" height="38" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="604" y="43" fill="var(--accent-ink)">ABL agent</text>
+      <rect x="540" y="20" width="128" height="38" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="604" y="43" fill="var(--accent-ink)">Agent (KB tool)</text>
       <rect x="540" y="120" width="128" height="56" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="604" y="141" fill="var(--accent-ink)">Query runtime</text><text x="604" y="157" fill="var(--muted)" font-size="10" font-weight="500">perms→hybrid→</text><text x="604" y="170" fill="var(--muted)" font-size="10" font-weight="500">fuse→rerank</text>
     </g>
     <g fill="none" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#g92d5-ar)">
@@ -40694,7 +41902,7 @@ print(resp.choices[0].message.content)        <span class="cmt"># the model's re
 
 <section class="topic">
 <h3>Microsoft Foundry: Foundry IQ, the Agent Framework, MCP, OpenAPI &amp; A2A</h3>
-<p class="lede">Foundry is Microsoft's full agent platform — managed knowledge over Azure AI Search, a unified framework for building and orchestrating agents, and open protocols so agents can use tools and talk to each other.</p>
+<p class="lede">Foundry is Microsoft's full service for building agents — managed knowledge over Azure AI Search, a unified framework for building and orchestrating agents, and open protocols so agents can use tools and talk to each other.</p>
 
 <p>Once a bank needs more than "call a model," Microsoft points it at <strong>Microsoft Foundry</strong> (the platform formerly, and still often, called Azure AI Foundry). Think of it as Azure's counterpart to AWS's Bedrock-plus-AgentCore: models, managed RAG, an agent framework, and the plumbing to run agents in an enterprise. Three parts matter most.</p>
 
@@ -40766,7 +41974,7 @@ print(reply.text)                             <span class="cmt"># the agent plan
 <div class="out"><div class="lbl">▶ Output</div>I've opened dispute #D-20481 for the $35 overdraft fee on your checking account. You'll get an update within 5 business days.</div>
 
 <h4>In production</h4>
-<p>Foundry's selling point for a bank is <strong>governance by inheritance</strong>: agents run inside your Azure tenant, under Entra ID identity, with Azure's networking, logging, and compliance already wrapped around them, and Foundry IQ's security-trimmed retrieval means an agent can't surface a document the user couldn't open. The costs and failure modes mirror any agent platform — token spend climbs with multi-agent chatter (Magentic can fan out fast, so cap steps and set budgets), retrieval must be tuned so agentic multi-hop doesn't balloon latency, and multi-agent and A2A setups widen the attack surface (a called agent is untrusted input — validate what comes back). Observability is built on OpenTelemetry, so you can trace every agent and sub-agent step.</p>
+<p>Foundry's selling point for a bank is <strong>governance by inheritance</strong>: agents run inside your Azure tenant, under Entra ID identity, with Azure's networking, logging, and compliance already wrapped around them, and Foundry IQ's security-trimmed retrieval means an agent can't surface a document the user couldn't open. The costs and failure modes mirror any agent system — token spend climbs with multi-agent chatter (Magentic can fan out fast, so cap steps and set budgets), retrieval must be tuned so agentic multi-hop doesn't balloon latency, and multi-agent and A2A setups widen the attack surface (a called agent is untrusted input — validate what comes back). Observability is built on OpenTelemetry, so you can trace every agent and sub-agent step.</p>
 
 <div class="warn">
   <div class="lbl">⚠ Watch out</div>
